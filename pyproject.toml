@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "pdm"
 version = "0.1.0"
 description = "Predictive Maintenance ML Pipeline (NASA C-MAPSS, RUL regression)"
-requires-python = ">=3.12,<3.13"
+requires-python = ">=3.12,<3.15"
 readme = "README.md"
 authors = [{ name = "habib", email = "habibalfauzan1@gmail.com" }]
 
