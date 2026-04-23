@@ -1,0 +1,52 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.installed.cfg
+*.egg
+.pytest_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+.coverage.*
+
+# Virtual env
+.venv/
+venv/
+env/
+
+# Env files
+.env
+.env.local
+.env.*.local
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Docker volumes
+.docker/
+
+# Data (we commit the C-MAPSS seed in Phase 1, but ignore everything else under data/)
+data/*
+!data/cmapss/
+data/cmapss/.gitkeep_only_committed
+
+# MLflow / model artifacts (only when running outside containers)
+mlruns/
+artifacts/
+
+# OS
+Thumbs.db
+
+# Claude / project docs (local only)
+.claude/
+docs/
