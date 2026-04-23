@@ -37,8 +37,12 @@ app = FastAPI(
 )
 
 
-def _session() -> Session:
-    return get_sessionmaker()()
+def _session():
+    session = get_sessionmaker()()
+    try:
+        yield session
+    finally:
+        session.close()
 
 
 SessionDep = Annotated[Session, Depends(_session)]
