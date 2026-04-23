@@ -27,9 +27,9 @@ def _test_settings() -> Settings:
     """
     # Force test DB regardless of what .env says
     os.environ["POSTGRES_DB"] = "pdm_test"
-    # Default to localhost when running on the host; CI/devcontainer can override
+    # Default to localhost:5433 (Docker maps 5433->5432 on Windows to avoid native pg conflict)
     os.environ.setdefault("POSTGRES_HOST", "localhost")
-    os.environ.setdefault("POSTGRES_PORT", "5432")
+    os.environ.setdefault("POSTGRES_PORT", "5433")
     os.environ.setdefault("POSTGRES_USER", "pdm")
     os.environ.setdefault("POSTGRES_PASSWORD", "pdm")
     os.environ.setdefault("MINIO_ENDPOINT_URL", "http://localhost:9000")
