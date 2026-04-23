@@ -1,5 +1,4 @@
-# Base stack: infra only (postgres, minio).
-# Application services (apis, simulator, prefect, mlflow) come in later phases.
+# Base stack: infra + application services.
 # Override file (docker-compose.override.yml) adds local-dev conveniences.
 
 services:
@@ -53,6 +52,73 @@ services:
       echo 'minio buckets ready';
       "
     restart: "no"
+
+  migrate:
+    build: .
+    image: pdm:dev
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER:-pdm}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-pdm}
+      POSTGRES_DB: ${POSTGRES_DB:-pdm}
+      MINIO_ENDPOINT_URL: http://minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
+      MINIO_BUCKET_RAW: ${MINIO_BUCKET_RAW:-raw-data}
+      MINIO_BUCKET_ARTIFACTS: ${MINIO_BUCKET_ARTIFACTS:-mlflow-artifacts}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  ingestion-api:
+    build: .
+    image: pdm:dev
+    command: >
+      uvicorn pdm.apis.ingestion_api:app
+      --host 0.0.0.0 --port 8000
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER:-pdm}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-pdm}
+      POSTGRES_DB: ${POSTGRES_DB:-pdm}
+      MINIO_ENDPOINT_URL: http://minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
+      MINIO_BUCKET_RAW: ${MINIO_BUCKET_RAW:-raw-data}
+      MINIO_BUCKET_ARTIFACTS: ${MINIO_BUCKET_ARTIFACTS:-mlflow-artifacts}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
+
+  simulator:
+    build: .
+    image: pdm:dev
+    command: ["python", "-m", "pdm.simulator.run"]
+    environment:
+      INGESTION_API_URL: http://ingestion-api:8000
+      INGEST_INTERVAL_SEC: ${INGEST_INTERVAL_SEC:-5}
+      CMAPSS_TRAIN_FILE: /app/data/cmapss/train_FD001.txt
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    depends_on:
+      ingestion-api:
+        condition: service_healthy
+    volumes:
+      - ./data:/app/data:ro
+    restart: unless-stopped
 
 volumes:
   postgres_data:

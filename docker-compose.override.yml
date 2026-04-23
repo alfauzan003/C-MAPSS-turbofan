@@ -10,3 +10,7 @@ services:
     ports:
       - "9000:9000"   # S3 API
       - "9001:9001"   # Web console
+
+  ingestion-api:
+    ports:
+      - "8000:8000"
