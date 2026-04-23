@@ -1,0 +1,12 @@
+# Local-only conveniences: expose ports to the host for direct access.
+# Not used on the VPS (override files don't compose by default in production).
+
+services:
+  postgres:
+    ports:
+      - "5432:5432"
+
+  minio:
+    ports:
+      - "9000:9000"   # S3 API
+      - "9001:9001"   # Web console

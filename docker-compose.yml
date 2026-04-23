@@ -1,0 +1,59 @@
+# Base stack: infra only (postgres, minio).
+# Application services (apis, simulator, prefect, mlflow) come in later phases.
+# Override file (docker-compose.override.yml) adds local-dev conveniences.
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-pdm}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-pdm}
+      POSTGRES_DB: ${POSTGRES_DB:-pdm}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/postgres-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-pdm}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-minioadmin}
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  minio-init:
+    # One-shot job that creates the buckets on first boot
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
+      MINIO_BUCKET_RAW: ${MINIO_BUCKET_RAW:-raw-data}
+      MINIO_BUCKET_ARTIFACTS: ${MINIO_BUCKET_ARTIFACTS:-mlflow-artifacts}
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 $$MINIO_ACCESS_KEY $$MINIO_SECRET_KEY;
+      mc mb --ignore-existing local/$$MINIO_BUCKET_RAW;
+      mc mb --ignore-existing local/$$MINIO_BUCKET_ARTIFACTS;
+      echo 'minio buckets ready';
+      "
+    restart: "no"
+
+volumes:
+  postgres_data:
+  minio_data:
