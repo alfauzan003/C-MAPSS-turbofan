@@ -9,10 +9,7 @@ from pdm.config import get_settings
 from pdm.db import Base
 
 # Import all ORM modules so their classes register on Base.metadata
-try:
-    import pdm.orm  # noqa: F401
-except ModuleNotFoundError:
-    pass  # pdm.orm added in Phase 1
+import pdm.orm  # noqa: F401
 
 config = context.config
 
