@@ -14,3 +14,7 @@ services:
   ingestion-api:
     ports:
       - "8000:8000"
+
+  mlflow:
+    ports:
+      - "5000:5000"
