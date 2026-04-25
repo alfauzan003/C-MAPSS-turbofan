@@ -42,19 +42,19 @@ def compute_windows(
         out["time_since_start"] = pd.Series(dtype="int64")
         return out
 
-    out = df.copy()
-    grouped = out.groupby("engine_id", sort=False, group_keys=False)
+    grouped = df.groupby("engine_id", sort=False, group_keys=False)
+    new_cols: dict[str, pd.Series] = {}
 
     for col in sensor_cols:
         for w in windows:
-            out[f"{col}_roll{w}_mean"] = grouped[col].transform(
+            new_cols[f"{col}_roll{w}_mean"] = grouped[col].transform(
                 lambda s, w=w: s.rolling(window=w, min_periods=1).mean()
             )
-            out[f"{col}_roll{w}_std"] = grouped[col].transform(
+            new_cols[f"{col}_roll{w}_std"] = grouped[col].transform(
                 lambda s, w=w: s.rolling(window=w, min_periods=2).std()
             )
         for lag in lags:
-            out[f"{col}_lag{lag}"] = grouped[col].shift(lag)
+            new_cols[f"{col}_lag{lag}"] = grouped[col].shift(lag)
 
-    out["time_since_start"] = grouped["cycle"].transform(lambda s: s - s.min()).astype("int64")
-    return out
+    new_cols["time_since_start"] = grouped["cycle"].transform(lambda s: s - s.min()).astype("int64")
+    return pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)

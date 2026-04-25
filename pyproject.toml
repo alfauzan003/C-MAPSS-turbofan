@@ -40,7 +40,7 @@ dependencies = [
   "prefect>=3.0,<4",
 
   # Experiment tracking + model registry
-  "mlflow>=2.16,<3",
+  "mlflow>=3,<4",
 
   # Logging
   "structlog>=24.1,<26",
