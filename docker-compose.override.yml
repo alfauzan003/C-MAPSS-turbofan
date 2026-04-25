@@ -18,3 +18,7 @@ services:
   mlflow:
     ports:
       - "5000:5000"
+
+  prefect-server:
+    ports:
+      - "4200:4200"

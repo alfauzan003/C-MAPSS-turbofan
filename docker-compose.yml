@@ -149,6 +149,58 @@ services:
       start_period: 20s
     restart: unless-stopped
 
+  prefect-server:
+    image: prefecthq/prefect:3-latest
+    command: ["prefect", "server", "start", "--host", "0.0.0.0"]
+    environment:
+      PREFECT_SERVER_API_HOST: 0.0.0.0
+      PREFECT_API_DATABASE_CONNECTION_URL: postgresql+asyncpg://${POSTGRES_USER:-pdm}:${POSTGRES_PASSWORD:-pdm}@postgres:5432/prefect
+      PREFECT_UI_URL: http://localhost:4200
+      PREFECT_API_URL: http://localhost:4200/api
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:4200/api/health',timeout=2).status==200 else 1)\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+
+  prefect-worker:
+    build: .
+    image: pdm:dev
+    command: ["python", "-m", "pdm.flows.training_flow"]
+    environment:
+      # Connect to Prefect server
+      PREFECT_API_URL: http://prefect-server:4200/api
+      # App env
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER:-pdm}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-pdm}
+      POSTGRES_DB: ${POSTGRES_DB:-pdm}
+      MINIO_ENDPOINT_URL: http://minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
+      MINIO_BUCKET_RAW: ${MINIO_BUCKET_RAW:-raw-data}
+      MINIO_BUCKET_ARTIFACTS: ${MINIO_BUCKET_ARTIFACTS:-mlflow-artifacts}
+      # MLflow + S3 endpoint for boto3 inside the worker
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      MLFLOW_S3_ENDPOINT_URL: http://minio:9000
+      AWS_ACCESS_KEY_ID: ${MINIO_ACCESS_KEY:-minioadmin}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_SECRET_KEY:-minioadmin}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    depends_on:
+      prefect-server:
+        condition: service_healthy
+      mlflow:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
 volumes:
   postgres_data:
   minio_data:
