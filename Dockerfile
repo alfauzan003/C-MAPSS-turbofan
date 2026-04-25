@@ -23,9 +23,9 @@ COPY pdm/ ./pdm/
 COPY migrations/ ./migrations/
 COPY alembic.ini ./
 
-# Install the package in editable mode WITH dev extras.
-# Editable so host-mounted volumes in dev override the baked source.
-RUN pip install --upgrade pip && pip install -e ".[dev]"
+# pip 26 resolver depth limit fails on the mlflow+prefect dep tree; install uv
+# and use it instead (uv has no depth limit and is 10-100x faster).
+RUN pip install uv && uv pip install -e "." --system
 
 # Default to a no-op so docker-compose `command:` overrides decide what runs
 CMD ["python", "-c", "print('pdm image: override the command in docker-compose.yml')"]
