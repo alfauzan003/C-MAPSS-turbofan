@@ -4,7 +4,7 @@ All operations are grouped by `engine_id` so per-engine traces don't bleed
 into each other.
 """
 
-from collections.abc import Iterable
+from collections.abc import Sequence
 
 import pandas as pd
 
@@ -14,7 +14,7 @@ DEFAULT_LAGS: tuple[int, ...] = (1, 2, 5)
 
 def compute_windows(
     df: pd.DataFrame,
-    sensor_cols: Iterable[str],
+    sensor_cols: Sequence[str],
     windows: tuple[int, ...] = DEFAULT_WINDOWS,
     lags: tuple[int, ...] = DEFAULT_LAGS,
 ) -> pd.DataFrame:
@@ -30,6 +30,7 @@ def compute_windows(
 
     Operations are grouped by `engine_id` so windows/lags never leak across engines.
     """
+    sensor_cols = list(sensor_cols)
     if df.empty:
         out = df.copy()
         for col in sensor_cols:
