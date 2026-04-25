@@ -5,5 +5,6 @@ to guarantee the same transforms apply on both sides.
 """
 
 from pdm.features.rul import compute_rul
+from pdm.features.windows import compute_windows
 
-__all__ = ["compute_rul"]
+__all__ = ["compute_rul", "compute_windows"]
