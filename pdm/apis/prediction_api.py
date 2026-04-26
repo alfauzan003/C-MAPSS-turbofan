@@ -4,6 +4,7 @@ Endpoints:
     POST /predict        -> 200 PredictResponse, also writes to predictions.served
     POST /reload-model   -> 200 {"loaded": "<version>"} | 500 (keeps old model)
     GET  /health         -> 200 {"status": "ok" | "degraded", ...}
+    GET  /metrics        -> 200 HTML dashboard (volume, latency, drift)
     GET  /docs           -> Swagger UI (auto)
 """
 
@@ -163,28 +164,32 @@ def metrics_page(request: Request) -> HTMLResponse:
     model_name = svc.model_name if svc else "(none)"
     model_version = svc.model_version if svc else "(none)"
 
-    with get_engine().connect() as c:
-        counts = c.execute(text("""
-            SELECT count(*) AS total, COUNT(DISTINCT engine_id) AS engines
-            FROM predictions.served
-            WHERE served_at >= NOW() - INTERVAL '24 hours'
-        """)).mappings().one()
+    try:
+        with get_engine().connect() as c:
+            stats = c.execute(text("""
+                SELECT
+                    count(*) AS total,
+                    COUNT(DISTINCT engine_id) AS engines,
+                    COALESCE(percentile_cont(0.5)  WITHIN GROUP (ORDER BY latency_ms), 0) AS p50,
+                    COALESCE(percentile_cont(0.95) WITHIN GROUP (ORDER BY latency_ms), 0) AS p95
+                FROM predictions.served
+                WHERE served_at >= NOW() - INTERVAL '24 hours'
+            """)).mappings().one()
 
-        latency = c.execute(text("""
-            SELECT
-                COALESCE(percentile_cont(0.5)  WITHIN GROUP (ORDER BY latency_ms), 0) AS p50,
-                COALESCE(percentile_cont(0.95) WITHIN GROUP (ORDER BY latency_ms), 0) AS p95
-            FROM predictions.served
-            WHERE served_at >= NOW() - INTERVAL '24 hours'
-        """)).mappings().one()
-
-        drift_row = c.execute(text("""
-            SELECT id, model_version, window_start, window_end,
-                   psi_per_feature, max_psi, alert, created_at
-            FROM predictions.drift_reports
-            ORDER BY created_at DESC
-            LIMIT 1
-        """)).mappings().first()
+            drift_row = c.execute(text("""
+                SELECT id, model_version, window_start, window_end,
+                       psi_per_feature, max_psi, alert, created_at
+                FROM predictions.drift_reports
+                ORDER BY created_at DESC
+                LIMIT 1
+            """)).mappings().first()
+    except SQLAlchemyError as e:
+        log = get_logger("prediction-api")
+        log.error("metrics_db_query_failed", error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="metrics unavailable: database error",
+        ) from e
 
     drift_ctx = None
     if drift_row:
@@ -205,8 +210,8 @@ def metrics_page(request: Request) -> HTMLResponse:
     html = template.render(
         model_name=model_name,
         model_version=model_version,
-        counts={"total": counts["total"], "engines": counts["engines"]},
-        latency={"p50": float(latency["p50"]), "p95": float(latency["p95"])},
+        counts={"total": stats["total"], "engines": stats["engines"]},
+        latency={"p50": float(stats["p50"]), "p95": float(stats["p95"])},
         drift=drift_ctx,
     )
     return HTMLResponse(html)
