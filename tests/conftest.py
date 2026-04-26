@@ -53,8 +53,9 @@ def db_engine() -> Iterator[Engine]:
     settings = _test_settings()
     engine = build_engine(settings.database_url)
 
-    # Reset schemas (public + any ORM schemas like raw_sensor, features)
+    # Reset schemas (public + any ORM schemas like raw_sensor, features, predictions)
     with engine.begin() as conn:
+        conn.execute(text("DROP SCHEMA IF EXISTS predictions CASCADE"))
         conn.execute(text("DROP SCHEMA IF EXISTS features CASCADE"))
         conn.execute(text("DROP SCHEMA IF EXISTS raw_sensor CASCADE"))
         conn.execute(text("DROP SCHEMA IF EXISTS public CASCADE"))
