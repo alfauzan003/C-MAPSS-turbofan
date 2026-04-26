@@ -31,25 +31,40 @@ pdm/                      # Main package
   db.py                   # Base (DeclarativeBase), build_engine, get_engine, get_sessionmaker, session_scope
   logging.py              # configure_logging(), get_logger()
   schemas.py              # Pydantic schemas: SensorReadingIn, SensorReadingOut, HealthStatus
+  storage.py              # write_parquet(df, bucket, key), read_parquet(uri) — MinIO via boto3/pyarrow
   orm/
-    __init__.py            # exports SensorReading
+    __init__.py            # exports SensorReading, EngineWindow
     raw_sensor.py          # SensorReading ORM model → raw_sensor.readings
+    features.py            # EngineWindow ORM model → features.engine_window
   apis/
     ingestion_api.py       # FastAPI app: POST /sensor-readings, GET /health
   simulator/
     run.py                 # C-MAPSS CSV loader + posting loop
+  features/
+    __init__.py            # exports compute_rul, compute_windows
+    rul.py                 # compute_rul(df, max_rul) → adds "rul" column
+    windows.py             # compute_windows(df, sensor_cols, windows, lags)
+  models/
+    evaluate.py            # rmse(), mae(), cmapss_score()
+    train.py               # train_and_log() → TrainingResult(run_id, model_version, metrics)
+    registry.py            # load_production(), promote_to_production() — uses aliases not stages
+  flows/
+    training_flow.py       # Prefect flow; entrypoint: python -m pdm.flows.training_flow
 migrations/
   env.py                  # Alembic env; imports get_settings() + pdm.orm for metadata
   versions/f3e7be5076bd_create_raw_sensor_readings.py
+  versions/e3e436e8bb0c_create_features_engine_window.py
 scripts/
   postgres-init/
     00-hba-md5.sh          # Sets pg_hba.conf to trust auth (fixes Windows psycopg auth)
     01-create-test-db.sql  # Creates pdm_test database
+    02-create-mlflow-db.sql  # Creates mlflow database (idempotent)
+    03-create-prefect-db.sql # Creates prefect database (idempotent)
 data/cmapss/              # NASA C-MAPSS files (train/test/RUL FD001-FD004) — committed
 tests/
-  conftest.py             # db_engine (session, drops raw_sensor+public, runs migrations), db_session (per-test rollback)
-  unit/                   # 17 tests — no Docker needed
-  integration/            # 7 tests — require Docker postgres on port 5433
+  conftest.py             # db_engine (session, drops features+raw_sensor+public schemas, runs migrations), db_session (per-test rollback)
+  unit/                   # 33 tests — no Docker needed
+  integration/            # requires Docker full stack
 ```
 
 ## Environment setup
@@ -95,21 +110,23 @@ docker compose up -d --build
 docker compose logs -f ingestion-api simulator
 ```
 
-## Current status (2026-04-24)
+## Current status (2026-04-26)
 
 | Phase | Status |
 |-------|--------|
 | Phase 0 — Foundations | Complete |
 | Phase 1 — Ingestion Path | Complete |
-| Phase 2 — Feature Engineering / Prefect | Not started |
-| Phase 3 — ML / MLflow | Not started |
-| Phase 4 — Serving / FastAPI RUL endpoint | Not started |
+| Phase 2 — Feature Engineering / Prefect / MLflow | Complete |
+| Phase 3 — Prediction Path / FastAPI RUL endpoint | Not started |
 
-### What's running
-- **postgres** — `pdm` database + `raw_sensor.readings` table via Alembic migration
-- **minio** — S3-compatible object store
-- **ingestion-api** — FastAPI on :8000, accepts POST /sensor-readings
-- **simulator** — Posts C-MAPSS FD001 rows to ingestion-api every 5s
+### What's running (full stack)
+- **postgres** — `pdm` + `mlflow` + `prefect` databases
+- **minio** — S3-compatible; bucket `pdm-features` holds parquet snapshots
+- **mlflow** — tracking + model registry on :5000; image `pdm-mlflow:dev`
+- **prefect-server** — workflow server on :4200
+- **prefect-worker** — runs `pdm.flows.training_flow` on a schedule
+- **ingestion-api** — FastAPI on :8000
+- **simulator** — Posts C-MAPSS FD001 rows every 5s
 
 ## Key bugs fixed (for future reference)
 
@@ -119,8 +136,13 @@ docker compose logs -f ingestion-api simulator
 4. **Session leak in FastAPI**: `_session()` must be a generator (`yield`) so FastAPI closes it after each request — otherwise TRUNCATE in tests hangs waiting for lock
 5. **conftest schema cleanup**: `db_engine` fixture must drop `raw_sensor` schema before `public`, otherwise migration fails on second run
 6. **Alembic migration**: Must manually add `CREATE SCHEMA IF NOT EXISTS raw_sensor` to upgrade(); auto-generated migration omits it
+7. **MLflow v3 client/server mismatch**: container was on v2; local on v3 → `BAD_REQUEST (integer = character varying)`. Fix: pin `"mlflow>=3,<4"` in both `pyproject.toml` and `docker/mlflow.Dockerfile`.
+8. **MLflow v3 registry API change**: `get_latest_versions`/`transition_model_version_stage` deprecated. Use `search_model_versions` + `set_registered_model_alias("champion")` / `get_model_version_by_alias`. See `pdm/models/registry.py`.
+9. **DataFrame fragmentation**: column-by-column assignment to a wide DataFrame triggers `PerformanceWarning`. Collect new columns in a `dict[str, pd.Series]`, then do one `pd.concat`. See `pdm/features/windows.py`.
+10. **Docker image staleness**: if a container uses an old image after `docker compose build`, run `docker compose up -d <service>` — Compose will recreate it with the new image.
+11. **prefect-worker image rebuild**: worker runs `pdm.flows.training_flow`; if flows/ didn't exist at last build, you'll get `ModuleNotFoundError`. Fix: `docker compose build` then `docker compose up -d prefect-worker`.
 
-## Next steps (Phase 2)
+## Next steps (Phase 3)
 
-See `docs/superpowers/plans/` for the Phase 2 feature engineering plan.
-Key tasks: Prefect flow, feature computation (EWMA, lag features, RUL labels), write to `features` schema.
+See `docs/superpowers/plans/` for the Phase 3 prediction path plan.
+Key tasks: FastAPI `/predict` endpoint, load `champion` model from MLflow registry, accept sensor window, return RUL prediction.
