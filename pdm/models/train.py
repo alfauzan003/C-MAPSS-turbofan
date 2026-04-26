@@ -12,18 +12,22 @@ Returns (mlflow_run_id, model_version, metrics).
 
 from __future__ import annotations
 
+import enum
 import time
 from dataclasses import dataclass, field
 
+import httpx
 import mlflow
 import mlflow.xgboost
 import numpy as np
 import pandas as pd
 import xgboost as xgb
+from mlflow.tracking import MlflowClient
 from sklearn.model_selection import GroupShuffleSplit
 
 from pdm.logging import get_logger
 from pdm.models.evaluate import cmapss_score, mae, rmse
+from pdm.models.registry import PRODUCTION_ALIAS
 
 REGISTERED_MODEL_NAME = "pdm-rul"
 
@@ -139,10 +143,6 @@ def train_and_log(
 # Auto-promotion helpers
 # ---------------------------------------------------------------------------
 
-import enum  # noqa: E402
-
-import httpx  # noqa: E402
-
 
 class PromoteDecision(enum.Enum):
     PROMOTE = "promote"
@@ -168,15 +168,13 @@ def get_current_production_rmse(
     tracking_uri: str, name: str = REGISTERED_MODEL_NAME
 ) -> float | None:
     """Return the `rmse` metric of the current champion model, or None if there isn't one."""
-    import mlflow
-    from mlflow.tracking import MlflowClient
-
     mlflow.set_tracking_uri(tracking_uri)
     client = MlflowClient()
     try:
-        from pdm.models.registry import PRODUCTION_ALIAS
         v = client.get_model_version_by_alias(name=name, alias=PRODUCTION_ALIAS)
-    except Exception:
+    except Exception as e:
+        log = get_logger("train")
+        log.warning("get_champion_rmse_failed", error=str(e), name=name)
         return None
     run = client.get_run(v.run_id)
     rmse_metric = run.data.metrics.get("rmse")
@@ -185,10 +183,6 @@ def get_current_production_rmse(
 
 def promote(version: str, tracking_uri: str, name: str = REGISTERED_MODEL_NAME) -> None:
     """Set the champion alias to `version`."""
-    import mlflow
-    from mlflow.tracking import MlflowClient
-    from pdm.models.registry import PRODUCTION_ALIAS
-
     mlflow.set_tracking_uri(tracking_uri)
     MlflowClient().set_registered_model_alias(name=name, alias=PRODUCTION_ALIAS, version=version)
 

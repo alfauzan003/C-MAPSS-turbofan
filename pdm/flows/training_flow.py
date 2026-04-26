@@ -23,7 +23,14 @@ from pdm.config import get_settings
 from pdm.db import get_engine
 from pdm.features import compute_rul, compute_windows
 from pdm.logging import configure_logging, get_logger
-from pdm.models.train import train_and_log
+from pdm.models.train import (
+    PromoteDecision,
+    compare_and_promote_decision,
+    get_current_production_rmse,
+    promote,
+    train_and_log,
+    trigger_reload,
+)
 from pdm.storage import write_parquet
 
 SENSOR_COLS = [f"sensor_{i}" for i in range(1, 22)]
@@ -84,13 +91,6 @@ def train_model(df: pd.DataFrame, parquet_uri: str, training_run_id: str) -> dic
 @task
 def maybe_promote_and_reload(model_version: str, new_rmse: float) -> dict:
     """Compare to current champion; promote + reload if new is better."""
-    from pdm.models.train import (
-        PromoteDecision,
-        compare_and_promote_decision,
-        get_current_production_rmse,
-        promote,
-        trigger_reload,
-    )
     log = get_logger("training_flow")
     tracking_uri = os.environ.get("MLFLOW_TRACKING_URI", "http://mlflow:5000")
     prediction_api_url = os.environ.get("PREDICTION_API_URL", "http://prediction-api:8001")

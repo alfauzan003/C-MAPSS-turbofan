@@ -192,7 +192,7 @@ services:
       AWS_ACCESS_KEY_ID: ${MINIO_ACCESS_KEY:-minioadmin}
       AWS_SECRET_ACCESS_KEY: ${MINIO_SECRET_KEY:-minioadmin}
       PREDICTION_API_URL: http://prediction-api:8001
-      PROMOTE_RMSE_IMPROVEMENT_PCT: "2.0"
+      PROMOTE_RMSE_IMPROVEMENT_PCT: ${PROMOTE_RMSE_IMPROVEMENT_PCT:-2.0}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     depends_on:
       prefect-server:
