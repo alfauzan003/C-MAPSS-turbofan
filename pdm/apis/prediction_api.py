@@ -10,6 +10,7 @@ Endpoints:
 from __future__ import annotations
 
 import os
+from collections.abc import Generator
 from contextlib import asynccontextmanager
 from typing import Annotated
 
@@ -35,13 +36,12 @@ async def lifespan(app: FastAPI):
     configure_logging(level=get_settings().log_level, service="prediction-api")
     log = get_logger("prediction-api")
 
-    # Try to load the Production model. If it fails, start in degraded mode —
-    # /predict will return 503 until /reload-model succeeds.
+    app.state.predict_service = None
+    app.state.startup_error = None
     try:
         app.state.predict_service = load_production_service(_tracking_uri())
         log.info("model_loaded", version=app.state.predict_service.model_version)
     except Exception as e:
-        app.state.predict_service = None
         app.state.startup_error = str(e)
         log.warning("model_load_failed_starting_degraded", error=str(e))
 
@@ -61,12 +61,12 @@ def _service(request: Request) -> PredictService:
     if svc is None:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"model not loaded: {getattr(request.app.state, 'startup_error', 'unknown')}",
+            detail=f"model not loaded: {request.app.state.startup_error or 'unknown'}",
         )
     return svc
 
 
-def _session() -> Session:
+def _session() -> Generator[Session, None, None]:
     """Generator-based dependency so FastAPI closes the session after each request."""
     sess = get_sessionmaker()()
     try:
@@ -104,7 +104,10 @@ def health(request: Request) -> HealthStatus:
 
 @app.post("/predict", response_model=PredictResponse, status_code=status.HTTP_200_OK)
 def predict(payload: PredictRequest, svc: ServiceDep, session: SessionDep) -> PredictResponse:
-    result = svc.predict(payload.readings)
+    try:
+        result = svc.predict(payload.readings)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e)) from e
     row = ServedPrediction(
         engine_id=result.engine_id,
         predicted_rul=result.predicted_rul,
@@ -114,8 +117,17 @@ def predict(payload: PredictRequest, svc: ServiceDep, session: SessionDep) -> Pr
         n_input_rows=result.n_input_rows,
         latency_ms=result.latency_ms,
     )
-    session.add(row)
-    session.commit()
+    try:
+        session.add(row)
+        session.commit()
+    except SQLAlchemyError as e:
+        session.rollback()
+        log = get_logger("prediction-api")
+        log.error("prediction_log_failed", error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="failed to persist prediction",
+        ) from e
     return result.to_response()
 
 
