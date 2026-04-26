@@ -22,3 +22,7 @@ services:
   prefect-server:
     ports:
       - "4200:4200"
+
+  prediction-api:
+    ports:
+      - "8001:8001"
