@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>PDM Prediction API — /metrics</title>
+<style>
+  body { font-family: -apple-system, system-ui, sans-serif; max-width: 980px; margin: 32px auto; padding: 0 16px; color: #1a1a1a; }
+  h1 { margin-bottom: 4px; }
+  h2 { margin-top: 32px; border-bottom: 1px solid #ddd; padding-bottom: 6px; }
+  .sub { color: #777; font-size: 14px; margin-bottom: 24px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }
+  .card { border: 1px solid #e3e3e3; border-radius: 6px; padding: 14px; background: #fafafa; }
+  .card .k { font-size: 12px; color: #888; text-transform: uppercase; letter-spacing: 0.04em; }
+  .card .v { font-size: 22px; margin-top: 4px; font-variant-numeric: tabular-nums; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; margin-top: 12px; }
+  th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid #eee; font-variant-numeric: tabular-nums; }
+  th { background: #f3f3f3; font-weight: 600; }
+  .alert { color: #b00020; font-weight: 600; }
+  .ok { color: #1b7a3e; font-weight: 600; }
+  code { background: #f3f3f3; padding: 2px 6px; border-radius: 4px; }
+</style>
+</head>
+<body>
+  <h1>PDM Prediction API</h1>
+  <div class="sub">Live metrics — model <code>{{ model_name }}</code> v<code>{{ model_version }}</code></div>
+
+  <h2>Recent prediction volume (last 24h)</h2>
+  <div class="grid">
+    <div class="card"><div class="k">Predictions served</div><div class="v">{{ counts.total }}</div></div>
+    <div class="card"><div class="k">Distinct engines</div><div class="v">{{ counts.engines }}</div></div>
+    <div class="card"><div class="k">p50 latency (ms)</div><div class="v">{{ '%.1f' % latency.p50 }}</div></div>
+    <div class="card"><div class="k">p95 latency (ms)</div><div class="v">{{ '%.1f' % latency.p95 }}</div></div>
+  </div>
+
+  <h2>Latest drift report</h2>
+  {% if drift %}
+    <div class="grid">
+      <div class="card"><div class="k">Computed</div><div class="v" style="font-size: 16px;">{{ drift.created_at }}</div></div>
+      <div class="card"><div class="k">Window</div><div class="v" style="font-size: 16px;">{{ drift.window_hours }}h</div></div>
+      <div class="card"><div class="k">Max PSI</div><div class="v">{{ '%.3f' % drift.max_psi }}</div></div>
+      <div class="card">
+        <div class="k">Alert</div>
+        <div class="v {{ 'alert' if drift.alert else 'ok' }}">
+          {{ 'YES' if drift.alert else 'no' }}
+        </div>
+      </div>
+    </div>
+
+    <table>
+      <thead><tr><th>Feature</th><th>PSI</th><th>Status</th></tr></thead>
+      <tbody>
+      {% for feat, psi in drift.psi_sorted %}
+        <tr>
+          <td>{{ feat }}</td>
+          <td>{{ '%.3f' % psi }}</td>
+          <td>
+            {% if psi > 0.25 %}<span class="alert">significant</span>
+            {% elif psi > 0.10 %}moderate
+            {% else %}<span class="ok">stable</span>{% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <p class="sub">No drift report yet — waiting for the monitoring flow to run.</p>
+  {% endif %}
+
+  <h2>Endpoints</h2>
+  <ul>
+    <li><a href="/docs">/docs</a> — interactive API docs (Swagger UI)</li>
+    <li><a href="/health">/health</a> — JSON liveness + dependency status</li>
+    <li><code>POST /predict</code> — RUL prediction</li>
+    <li><code>POST /reload-model</code> — pick up newer champion model</li>
+  </ul>
+</body>
+</html>

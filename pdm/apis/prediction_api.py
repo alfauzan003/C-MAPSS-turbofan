@@ -12,9 +12,12 @@ from __future__ import annotations
 import os
 from collections.abc import Generator
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, HTTPException, Request, status
+from fastapi.responses import HTMLResponse
+from jinja2 import Environment, FileSystemLoader, select_autoescape
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
@@ -53,6 +56,12 @@ app = FastAPI(
     version="0.1.0",
     description="Serves RUL predictions from the current MLflow Production model.",
     lifespan=lifespan,
+)
+
+_TEMPLATE_DIR = Path(__file__).resolve().parent.parent / "templates"
+_jinja = Environment(
+    loader=FileSystemLoader(str(_TEMPLATE_DIR)),
+    autoescape=select_autoescape(["html"]),
 )
 
 
@@ -145,3 +154,59 @@ def reload_model(request: Request) -> dict:
     request.app.state.predict_service = new_svc
     log.info("model_reloaded", version=new_svc.model_version)
     return {"loaded": new_svc.model_version}
+
+
+@app.get("/metrics", response_class=HTMLResponse)
+def metrics_page(request: Request) -> HTMLResponse:
+    """Server-rendered HTML metrics dashboard."""
+    svc = request.app.state.predict_service
+    model_name = svc.model_name if svc else "(none)"
+    model_version = svc.model_version if svc else "(none)"
+
+    with get_engine().connect() as c:
+        counts = c.execute(text("""
+            SELECT count(*) AS total, COUNT(DISTINCT engine_id) AS engines
+            FROM predictions.served
+            WHERE served_at >= NOW() - INTERVAL '24 hours'
+        """)).mappings().one()
+
+        latency = c.execute(text("""
+            SELECT
+                COALESCE(percentile_cont(0.5)  WITHIN GROUP (ORDER BY latency_ms), 0) AS p50,
+                COALESCE(percentile_cont(0.95) WITHIN GROUP (ORDER BY latency_ms), 0) AS p95
+            FROM predictions.served
+            WHERE served_at >= NOW() - INTERVAL '24 hours'
+        """)).mappings().one()
+
+        drift_row = c.execute(text("""
+            SELECT id, model_version, window_start, window_end,
+                   psi_per_feature, max_psi, alert, created_at
+            FROM predictions.drift_reports
+            ORDER BY created_at DESC
+            LIMIT 1
+        """)).mappings().first()
+
+    drift_ctx = None
+    if drift_row:
+        psi_dict = dict(drift_row["psi_per_feature"])
+        psi_sorted = sorted(psi_dict.items(), key=lambda kv: -kv[1])
+        window_hours = round(
+            (drift_row["window_end"] - drift_row["window_start"]).total_seconds() / 3600, 1
+        )
+        drift_ctx = {
+            "created_at": drift_row["created_at"].strftime("%Y-%m-%d %H:%M UTC"),
+            "max_psi": float(drift_row["max_psi"]),
+            "alert": bool(drift_row["alert"]),
+            "psi_sorted": psi_sorted,
+            "window_hours": window_hours,
+        }
+
+    template = _jinja.get_template("metrics.html")
+    html = template.render(
+        model_name=model_name,
+        model_version=model_version,
+        counts={"total": counts["total"], "engines": counts["engines"]},
+        latency={"p50": float(latency["p50"]), "p95": float(latency["p95"])},
+        drift=drift_ctx,
+    )
+    return HTMLResponse(html)

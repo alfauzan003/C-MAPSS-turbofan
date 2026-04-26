@@ -44,6 +44,9 @@ dependencies = [
 
   # Logging
   "structlog>=24.1,<26",
+
+  # Templating
+  "jinja2>=3.1,<4",
 ]
 
 [project.optional-dependencies]
@@ -85,3 +88,6 @@ quote-style = "double"
 python_version = "3.12"
 strict = false
 ignore_missing_imports = true
+
+[tool.setuptools.package-data]
+pdm = ["templates/*.html"]
