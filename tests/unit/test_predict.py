@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from pdm.predict import PredictService, _fingerprint, _readings_to_df
 from pdm.schemas import PredictReadingRow
@@ -11,7 +12,7 @@ from pdm.schemas import PredictReadingRow
 
 @dataclass
 class _FakeModel:
-    """Returns predicted_rul = 100 - cycle of last row, deterministically."""
+    """Returns 50.0 for every input row, deterministically."""
 
     def predict(self, X: pd.DataFrame) -> np.ndarray:
         # Return one prediction per row; service uses the last one.
@@ -55,3 +56,27 @@ def test_predict_service_returns_last_window_prediction():
     assert out.model_version == "1"
     assert out.n_input_rows == 10
     assert out.latency_ms >= 0
+
+
+def test_predict_service_rejects_empty_rows():
+    svc = PredictService(model=_FakeModel(), model_name="fake", model_version="1")
+    with pytest.raises(ValueError, match="non-empty"):
+        svc.predict([])
+
+
+def test_predict_service_rejects_mixed_engine_ids():
+    svc = PredictService(model=_FakeModel(), model_name="fake", model_version="1")
+    row1 = _row(cycle=1)
+    # Create a row with engine_id=2
+    base = {
+        "engine_id": 2,
+        "cycle": 2,
+        "op_setting_1": 0.0,
+        "op_setting_2": 0.0,
+        "op_setting_3": 100.0,
+    }
+    for i in range(1, 22):
+        base[f"sensor_{i}"] = float(i)
+    row2 = PredictReadingRow(**base)
+    with pytest.raises(ValueError, match="engine_id"):
+        svc.predict([row1, row2])

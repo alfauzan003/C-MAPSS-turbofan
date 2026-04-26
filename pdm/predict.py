@@ -62,6 +62,14 @@ class PredictService:
         self._log = get_logger("predict")
 
     def predict(self, rows: list[PredictReadingRow]) -> PredictResult:
+        """Run inference on a window of readings for a single engine.
+
+        Known limitation: `time_since_start` is computed as cycle - min(cycle) within
+        the input window. If the window starts at a late cycle (e.g., cycles 50-59),
+        time_since_start will be 0-9, the same as a new engine. This may cause the
+        model to overestimate RUL for late-life engines. Callers should send the
+        full trace from cycle 1 when possible.
+        """
         if not rows:
             raise ValueError("rows must be non-empty")
         engine_ids = {r.engine_id for r in rows}
@@ -78,6 +86,12 @@ class PredictService:
         feature_cols = [c for c in feats.columns if c not in ("engine_id", "cycle")]
         clean = feats.dropna(subset=feature_cols)
         if clean.empty:
+            self._log.warning(
+                "nan_fallback_short_window",
+                engine_id=engine_id,
+                n_input_rows=len(rows),
+                note="window too short for lag features; predictions may be unreliable",
+            )
             clean = feats.fillna(0.0)
 
         # Predict on all rows of the window; report the LAST (most recent) prediction.
