@@ -38,14 +38,14 @@ def upgrade() -> None:
         ),
         schema="predictions",
     )
-    op.create_index("ix_served_engine_id", "served", ["engine_id"], schema="predictions")
-    op.create_index("ix_served_model_version", "served", ["model_version"], schema="predictions")
-    op.create_index("ix_served_served_at", "served", ["served_at"], schema="predictions")
+    op.create_index(op.f("ix_served_engine_id"), "served", ["engine_id"], schema="predictions")
+    op.create_index(op.f("ix_served_model_version"), "served", ["model_version"], schema="predictions")
+    op.create_index(op.f("ix_served_served_at"), "served", ["served_at"], schema="predictions")
 
 
 def downgrade() -> None:
-    op.drop_index("ix_served_served_at", table_name="served", schema="predictions")
-    op.drop_index("ix_served_model_version", table_name="served", schema="predictions")
-    op.drop_index("ix_served_engine_id", table_name="served", schema="predictions")
+    op.drop_index(op.f("ix_served_served_at"), table_name="served", schema="predictions")
+    op.drop_index(op.f("ix_served_model_version"), table_name="served", schema="predictions")
+    op.drop_index(op.f("ix_served_engine_id"), table_name="served", schema="predictions")
     op.drop_table("served", schema="predictions")
     op.execute("DROP SCHEMA IF EXISTS predictions CASCADE")

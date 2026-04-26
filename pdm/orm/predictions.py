@@ -1,3 +1,8 @@
+"""ORM models for the predictions schema.
+
+`served`: one row per prediction returned to a client.
+(`drift_reports` will be added in Phase 4.)
+"""
 from datetime import datetime
 
 from sqlalchemy import BigInteger, DateTime, Float, Integer, String, func
