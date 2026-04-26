@@ -4,6 +4,7 @@ Strategy: bypass MLflow by injecting a fake PredictService onto app.state.
 This isolates the API logic from MLflow's load path.
 """
 
+import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import Engine, text
@@ -11,12 +12,9 @@ from sqlalchemy import Engine, text
 from pdm.apis.prediction_api import app
 from pdm.predict import PredictService
 
-SENSOR_COLS = [f"sensor_{i}" for i in range(1, 22)]
-
 
 class _FakeModel:
     def predict(self, X):
-        import numpy as np
         return np.full(len(X), 42.0)
 
 
@@ -38,6 +36,8 @@ def client(db_engine: Engine) -> TestClient:
     """TestClient with a fake PredictService preinstalled (skips MLflow load)."""
     fake_svc = PredictService(model=_FakeModel(), model_name="pdm-rul", model_version="test")
     with TestClient(app) as c:
+        # The lifespan runs before this block. We overwrite app.state here
+        # to bypass the MLflow load attempt (which may fail in test environments).
         c.app.state.predict_service = fake_svc
         c.app.state.startup_error = None
         yield c
@@ -61,6 +61,8 @@ def test_predict_returns_response_and_logs_to_db(client: TestClient, db_engine: 
     assert body["latency_ms"] >= 0
 
     with db_engine.connect() as c:
+        n = c.execute(text("SELECT count(*) FROM predictions.served")).scalar_one()
+        assert n == 1, f"expected 1 row in predictions.served, got {n}"
         row = c.execute(
             text(
                 "SELECT engine_id, predicted_rul, model_version, n_input_rows "
@@ -84,6 +86,7 @@ def test_predict_rejects_mixed_engines(client: TestClient):
     r = client.post("/predict", json=payload)
     # After the fix in Task 4: ValueError from mixed engine IDs → HTTP 422
     assert r.status_code == 422
+    assert "engine_id" in r.json()["detail"]
 
 
 @pytest.mark.integration
