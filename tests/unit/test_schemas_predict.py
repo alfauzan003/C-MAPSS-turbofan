@@ -38,3 +38,21 @@ def test_predict_request_rejects_too_long():
     rows = [_row(cycle=c) for c in range(1, 502)]
     with pytest.raises(ValidationError):
         PredictRequest(readings=rows)
+
+
+def test_predict_reading_row_rejects_zero_engine_id():
+    with pytest.raises(ValidationError):
+        PredictReadingRow(**_row(engine_id=0))
+
+
+def test_predict_reading_row_rejects_zero_cycle():
+    with pytest.raises(ValidationError):
+        PredictReadingRow(**_row(cycle=0))
+
+
+def test_predict_reading_row_rejects_missing_sensor():
+    data = _row()
+    del data["sensor_5"]
+    with pytest.raises(ValidationError) as exc:
+        PredictReadingRow(**data)
+    assert "sensor_5" in str(exc.value)

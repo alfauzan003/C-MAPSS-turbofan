@@ -99,6 +99,8 @@ class PredictRequest(BaseModel):
 
 
 class PredictResponse(BaseModel):
+    """Wire response returned by POST /predict."""
+
     engine_id: int
     predicted_rul: float
     model_name: str
