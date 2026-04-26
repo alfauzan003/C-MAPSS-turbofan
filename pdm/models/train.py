@@ -133,3 +133,76 @@ def train_and_log(
         mae=metrics["mae"],
     )
     return TrainingResult(run_id=run_id, model_version=str(version), metrics=metrics)
+
+
+# ---------------------------------------------------------------------------
+# Auto-promotion helpers
+# ---------------------------------------------------------------------------
+
+import enum  # noqa: E402
+
+import httpx  # noqa: E402
+
+
+class PromoteDecision(enum.Enum):
+    PROMOTE = "promote"
+    HOLD = "hold"
+
+
+def compare_and_promote_decision(
+    new_rmse: float,
+    current_production_rmse: float | None,
+    improvement_threshold_pct: float = 2.0,
+) -> PromoteDecision:
+    """Pure-function policy: promote iff new beats current by >= threshold percent.
+
+    If there is no current Production model, always promote.
+    """
+    if current_production_rmse is None:
+        return PromoteDecision.PROMOTE
+    improvement_pct = ((current_production_rmse - new_rmse) / current_production_rmse) * 100.0
+    return PromoteDecision.PROMOTE if improvement_pct >= improvement_threshold_pct else PromoteDecision.HOLD
+
+
+def get_current_production_rmse(
+    tracking_uri: str, name: str = REGISTERED_MODEL_NAME
+) -> float | None:
+    """Return the `rmse` metric of the current champion model, or None if there isn't one."""
+    import mlflow
+    from mlflow.tracking import MlflowClient
+
+    mlflow.set_tracking_uri(tracking_uri)
+    client = MlflowClient()
+    try:
+        from pdm.models.registry import PRODUCTION_ALIAS
+        v = client.get_model_version_by_alias(name=name, alias=PRODUCTION_ALIAS)
+    except Exception:
+        return None
+    run = client.get_run(v.run_id)
+    rmse_metric = run.data.metrics.get("rmse")
+    return float(rmse_metric) if rmse_metric is not None else None
+
+
+def promote(version: str, tracking_uri: str, name: str = REGISTERED_MODEL_NAME) -> None:
+    """Set the champion alias to `version`."""
+    import mlflow
+    from mlflow.tracking import MlflowClient
+    from pdm.models.registry import PRODUCTION_ALIAS
+
+    mlflow.set_tracking_uri(tracking_uri)
+    MlflowClient().set_registered_model_alias(name=name, alias=PRODUCTION_ALIAS, version=version)
+
+
+def trigger_reload(prediction_api_url: str) -> bool:
+    """POST /reload-model. Returns True on success, False on failure (logged)."""
+    log = get_logger("train")
+    try:
+        r = httpx.post(f"{prediction_api_url.rstrip('/')}/reload-model", timeout=10.0)
+        if r.status_code == 200:
+            log.info("reload_triggered", response=r.json())
+            return True
+        log.warning("reload_unexpected_status", status=r.status_code, body=r.text[:200])
+        return False
+    except httpx.HTTPError as e:
+        log.warning("reload_http_error", error=str(e))
+        return False

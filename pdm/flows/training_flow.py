@@ -81,6 +81,42 @@ def train_model(df: pd.DataFrame, parquet_uri: str, training_run_id: str) -> dic
     }
 
 
+@task
+def maybe_promote_and_reload(model_version: str, new_rmse: float) -> dict:
+    """Compare to current champion; promote + reload if new is better."""
+    from pdm.models.train import (
+        PromoteDecision,
+        compare_and_promote_decision,
+        get_current_production_rmse,
+        promote,
+        trigger_reload,
+    )
+    log = get_logger("training_flow")
+    tracking_uri = os.environ.get("MLFLOW_TRACKING_URI", "http://mlflow:5000")
+    prediction_api_url = os.environ.get("PREDICTION_API_URL", "http://prediction-api:8001")
+    threshold = float(os.environ.get("PROMOTE_RMSE_IMPROVEMENT_PCT", "2.0"))
+
+    current_rmse = get_current_production_rmse(tracking_uri)
+    decision = compare_and_promote_decision(
+        new_rmse=new_rmse,
+        current_production_rmse=current_rmse,
+        improvement_threshold_pct=threshold,
+    )
+    log.info(
+        "promote_decision",
+        decision=decision.value,
+        new_rmse=new_rmse,
+        current_rmse=current_rmse,
+        threshold_pct=threshold,
+    )
+    if decision is PromoteDecision.HOLD:
+        return {"promoted": False, "reason": "below_threshold_or_worse"}
+
+    promote(version=model_version, tracking_uri=tracking_uri)
+    reloaded = trigger_reload(prediction_api_url)
+    return {"promoted": True, "reloaded": reloaded, "version": model_version}
+
+
 @flow(name="pdm-training", log_prints=True)
 def training_flow(hours: int = 24, max_rul: int = 125) -> dict:
     """End-to-end: read raw → features → snapshot → train → log."""
@@ -101,8 +137,12 @@ def training_flow(hours: int = 24, max_rul: int = 125) -> dict:
 
     parquet_uri = snapshot_to_minio(feats, training_run_id)
     summary = train_model(feats, parquet_uri, training_run_id)
-    log.info("training_run_complete", **summary)
-    return {"status": "ok", "training_run_id": training_run_id, **summary}
+    promo = maybe_promote_and_reload(
+        model_version=summary["model_version"],
+        new_rmse=summary["rmse"],
+    )
+    log.info("training_run_complete", **summary, **promo)
+    return {"status": "ok", "training_run_id": training_run_id, **summary, **promo}
 
 
 if __name__ == "__main__":
