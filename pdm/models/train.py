@@ -122,8 +122,8 @@ def train_and_log(
         run_id = run.info.run_id
 
     client = mlflow.tracking.MlflowClient()
-    latest = client.get_latest_versions(name=REGISTERED_MODEL_NAME, stages=["None"])
-    version = latest[0].version if latest else "?"
+    versions = client.search_model_versions(f"name='{REGISTERED_MODEL_NAME}'")
+    version = max((v.version for v in versions), key=int) if versions else "?"
 
     log.info(
         "training_complete",
