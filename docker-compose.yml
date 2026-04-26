@@ -171,7 +171,7 @@ services:
   prefect-worker:
     build: .
     image: pdm:dev
-    command: ["python", "-m", "pdm.flows.training_flow"]
+    command: ["python", "-m", "pdm.flows._serve"]
     environment:
       # Connect to Prefect server
       PREFECT_API_URL: http://prefect-server:4200/api
