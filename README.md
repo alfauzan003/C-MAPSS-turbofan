@@ -12,7 +12,7 @@ served via FastAPI; tracked in MLflow; deployed via docker-compose.
 | Phase 1 | Ingestion Path (API, simulator, migrations) | ✅ Complete |
 | Phase 2 | Feature Engineering + Training Path (Prefect + XGBoost + MLflow) | ✅ Complete |
 | Phase 3 | Prediction path (RUL serving API) | ✅ Complete |
-| Phase 4 | Monitoring + auto-promotion | 🔜 Planned |
+| Phase 4 | Monitoring + auto-promotion | ✅ Complete |
 | Phase 5 | Polish + VPS deploy | 🔜 Planned |
 
 ## Quick start
@@ -43,8 +43,9 @@ Services started:
 | MinIO console | 9001 | http://localhost:9001 |
 | postgres | 5433 | `psql postgres://pdm:pdm@localhost:5433/pdm` |
 
+- **prediction-api** — serves RUL predictions; logs every call to `predictions.served`
 - **simulator** — posts FD001 rows to ingestion-api every 5 s
-- **prefect-worker** — runs the `pdm-training` deployment every 6 hours
+- **prefect-worker** — runs `pdm-training` (every 6 h) and `pdm-monitoring` (every 24 h)
 
 ### Watch data accumulate
 
@@ -58,14 +59,18 @@ docker compose exec postgres psql -U pdm -c "SELECT count(*) FROM raw_sensor.rea
 
 ### Trigger training
 
-The Prefect worker registers a `pdm-training` deployment that runs every 6 hours.
-To trigger immediately:
+The Prefect worker registers two deployments:
 
-1. Open http://localhost:4200 → Deployments → `pdm-training/training-default` → Quick run
-2. Watch the run complete in the UI
-3. Open http://localhost:5000 → Models → `pdm-rul` to see the new version
+| Deployment | Schedule | Purpose |
+|---|---|---|
+| `pdm-training/training-default` | every 6 h | Train XGBoost on recent data, auto-promote if RMSE improves >2% |
+| `pdm-monitoring/monitoring-default` | every 24 h | Compute PSI drift vs training baseline; write drift report |
 
-To promote a model version to the `champion` alias (required before Phase 3 serving):
+To trigger immediately: open http://localhost:4200 → Deployments → select deployment → **Quick run**.
+
+**Auto-promotion:** After each training run the worker compares the new model's RMSE to the current `champion` alias. If it improves by ≥ `PROMOTE_RMSE_IMPROVEMENT_PCT` (default 2%), the new version gets the `champion` alias and `/reload-model` is called automatically. Otherwise it stays in the registry for manual review.
+
+To force-promote a specific version manually:
 
 ```bash
 docker compose exec prefect-worker python - <<'PY'
@@ -94,9 +99,26 @@ simulator → POST /sensor-readings → ingestion-api → raw_sensor.readings (p
                                                          ↓
 prefect-worker (training_flow, every 6h):
   raw_sensor.readings → features → MinIO parquet snapshot → XGBoost → MLflow registry
+                                                                              ↓ (auto-promote if RMSE improves >2%)
+                                                                       champion alias
                                                                               ↓
-                                                             (Phase 3: prediction-api)
+POST /predict → prediction-api → predictions.served (postgres)
+                                         ↓
+prefect-worker (monitoring_flow, every 24h):
+  predictions.served + raw_sensor.readings → PSI vs baseline parquet → predictions.drift_reports
+                                                                              ↓
+                                                               GET /metrics (HTML dashboard)
 ```
+
+## /metrics dashboard
+
+http://localhost:8001/metrics — server-rendered HTML page showing:
+
+- Current model name + version
+- Predictions served in the last 24 h (count, distinct engines, p50/p95 latency)
+- Latest drift report: per-feature PSI, max PSI, alert status (alert fires when any feature PSI > 0.25)
+
+No drift report appears until the monitoring flow has run at least once.
 
 ## Calling /predict
 

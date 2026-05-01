@@ -33,11 +33,13 @@ pdm/                      # Main package
   schemas.py              # Pydantic schemas: SensorReadingIn, SensorReadingOut, HealthStatus
   storage.py              # write_parquet(df, bucket, key), read_parquet(uri) — MinIO via boto3/pyarrow
   orm/
-    __init__.py            # exports SensorReading, EngineWindow
+    __init__.py            # exports SensorReading, EngineWindow, ServedPrediction, DriftReport
     raw_sensor.py          # SensorReading ORM model → raw_sensor.readings
     features.py            # EngineWindow ORM model → features.engine_window
+    predictions.py         # ServedPrediction + DriftReport ORM models → predictions.* schema
   apis/
     ingestion_api.py       # FastAPI app: POST /sensor-readings, GET /health
+    prediction_api.py      # FastAPI app: POST /predict, POST /reload-model, GET /health, GET /metrics
   simulator/
     run.py                 # C-MAPSS CSV loader + posting loop
   features/
@@ -46,14 +48,25 @@ pdm/                      # Main package
     windows.py             # compute_windows(df, sensor_cols, windows, lags)
   models/
     evaluate.py            # rmse(), mae(), cmapss_score()
-    train.py               # train_and_log() → TrainingResult(run_id, model_version, metrics)
+    train.py               # train_and_log() → TrainingResult; compare_and_promote_decision(); promote(); trigger_reload()
     registry.py            # load_production(), promote_to_production() — uses aliases not stages
+  monitoring/
+    __init__.py            # exports compute_psi, compute_psi_per_column
+    drift.py               # compute_psi() — Population Stability Index; PSI_ALERT_THRESHOLD=0.25
   flows/
-    training_flow.py       # Prefect flow; entrypoint: python -m pdm.flows.training_flow
+    training_flow.py       # Prefect flow: fetch → features → snapshot → train → auto-promote
+    monitoring_flow.py     # Prefect flow: champion model → baseline parquet → PSI → DriftReport
+    _serve.py              # Single worker entrypoint: serves both training + monitoring deployments
+  predict.py               # PredictService, PredictResult, load_production_service()
+  schemas.py               # Pydantic schemas incl. PredictRequest, PredictResponse
+  templates/
+    metrics.html           # Jinja2 template for GET /metrics dashboard
 migrations/
   env.py                  # Alembic env; imports get_settings() + pdm.orm for metadata
   versions/f3e7be5076bd_create_raw_sensor_readings.py
   versions/e3e436e8bb0c_create_features_engine_window.py
+  versions/90efe718533c_create_predictions_served.py
+  versions/5d70d7c75074_create_predictions_drift_reports.py
 scripts/
   postgres-init/
     00-hba-md5.sh          # Sets pg_hba.conf to trust auth (fixes Windows psycopg auth)
@@ -62,9 +75,9 @@ scripts/
     03-create-prefect-db.sql # Creates prefect database (idempotent)
 data/cmapss/              # NASA C-MAPSS files (train/test/RUL FD001-FD004) — committed
 tests/
-  conftest.py             # db_engine (session, drops features+raw_sensor+public schemas, runs migrations), db_session (per-test rollback)
-  unit/                   # 33 tests — no Docker needed
-  integration/            # requires Docker full stack
+  conftest.py             # db_engine (drops predictions+features+raw_sensor+public schemas, runs migrations)
+  unit/                   # 56 tests — no Docker needed
+  integration/            # requires Docker full stack (postgres + minio + mlflow)
 ```
 
 ## Environment setup
@@ -110,22 +123,25 @@ docker compose up -d --build
 docker compose logs -f ingestion-api simulator
 ```
 
-## Current status (2026-04-26)
+## Current status (2026-05-01)
 
 | Phase | Status |
 |-------|--------|
 | Phase 0 — Foundations | Complete |
 | Phase 1 — Ingestion Path | Complete |
 | Phase 2 — Feature Engineering / Prefect / MLflow | Complete |
-| Phase 3 — Prediction Path / FastAPI RUL endpoint | Not started |
+| Phase 3 — Prediction Path / FastAPI RUL endpoint | Complete |
+| Phase 4 — Monitoring + Auto-Promotion | Complete |
+| Phase 5 — Polish + VPS Deploy | Not started |
 
 ### What's running (full stack)
 - **postgres** — `pdm` + `mlflow` + `prefect` databases
-- **minio** — S3-compatible; bucket `pdm-features` holds parquet snapshots
+- **minio** — S3-compatible; buckets `raw-data` (parquet snapshots) + `mlflow-artifacts`
 - **mlflow** — tracking + model registry on :5000; image `pdm-mlflow:dev`
 - **prefect-server** — workflow server on :4200
-- **prefect-worker** — runs `pdm.flows.training_flow` on a schedule
+- **prefect-worker** — runs `pdm.flows._serve` → hosts `pdm-training` (6h) + `pdm-monitoring` (24h)
 - **ingestion-api** — FastAPI on :8000
+- **prediction-api** — FastAPI on :8001; loads champion model from MLflow on startup
 - **simulator** — Posts C-MAPSS FD001 rows every 5s
 
 ## Key bugs fixed (for future reference)
@@ -140,9 +156,16 @@ docker compose logs -f ingestion-api simulator
 8. **MLflow v3 registry API change**: `get_latest_versions`/`transition_model_version_stage` deprecated. Use `search_model_versions` + `set_registered_model_alias("champion")` / `get_model_version_by_alias`. See `pdm/models/registry.py`.
 9. **DataFrame fragmentation**: column-by-column assignment to a wide DataFrame triggers `PerformanceWarning`. Collect new columns in a `dict[str, pd.Series]`, then do one `pd.concat`. See `pdm/features/windows.py`.
 10. **Docker image staleness**: if a container uses an old image after `docker compose build`, run `docker compose up -d <service>` — Compose will recreate it with the new image.
-11. **prefect-worker image rebuild**: worker runs `pdm.flows.training_flow`; if flows/ didn't exist at last build, you'll get `ModuleNotFoundError`. Fix: `docker compose build` then `docker compose up -d prefect-worker`.
+11. **prefect-worker image rebuild**: worker runs `pdm.flows._serve`; if flows/ didn't exist at last build, you'll get `ModuleNotFoundError`. Fix: `docker compose build` then `docker compose up -d prefect-worker`.
+12. **prediction-api lifespan**: `app.state.predict_service = None` and `app.state.startup_error = None` must both be set BEFORE the try block, so degraded startup is safe even on happy path.
+13. **FastAPI session dependency must be generator**: `_session()` must use `yield`, not `return Session`. Otherwise FastAPI never closes the session and TRUNCATE in tests hangs on lock.
+14. **MLflow v3 alias API — never use deprecated stages**: use `client.get_model_version_by_alias(name, alias="champion")` and `client.set_registered_model_alias(name, alias, version)`. Do NOT use `get_latest_versions(stages=["Production"])` or `transition_model_version_stage`.
+15. **conftest schema teardown order**: drop `predictions` schema FIRST (before features/raw_sensor/public), otherwise foreign-key constraints from predictions→raw_sensor block the drop.
+16. **Integration tests bypass MLflow** by injecting a fake `PredictService` directly onto `app.state` after `TestClient` construction — lifespan runs before the `with TestClient(app) as c:` block so overwrite immediately after.
+17. **train/serve skew — `time_since_start`**: computed from `min(cycle)` in the prediction window, not the true start of the engine's life. Documented as known limitation in `PredictService.predict`.
+18. **NaN fallback for short windows**: lag-5 features make the first 5 rows NaN; if fewer than 6 rows passed to `/predict`, the model still runs but the warning `nan_in_features` is logged.
 
-## Next steps (Phase 3)
+## Next steps (Phase 5)
 
-See `docs/superpowers/plans/` for the Phase 3 prediction path plan.
-Key tasks: FastAPI `/predict` endpoint, load `champion` model from MLflow registry, accept sensor window, return RUL prediction.
+See `docs/superpowers/plans/2026-04-22-phase-5-polish-vps-deploy.md`.
+Key tasks: `.env.example` audit, `deploy_vps.sh`, deploy to VPS, Caddy reverse proxy, demo URL, README screenshots.
