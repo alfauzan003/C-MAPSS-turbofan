@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>PDM Prediction API — /evaluate</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+  body { font-family: -apple-system, system-ui, sans-serif; max-width: 980px; margin: 32px auto; padding: 0 16px; color: #1a1a1a; }
+  h1 { margin-bottom: 4px; }
+  h2 { margin-top: 32px; border-bottom: 1px solid #ddd; padding-bottom: 6px; }
+  .sub { color: #777; font-size: 14px; margin-bottom: 24px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }
+  .card { border: 1px solid #e3e3e3; border-radius: 6px; padding: 14px; background: #fafafa; }
+  .card .k { font-size: 12px; color: #888; text-transform: uppercase; letter-spacing: 0.04em; }
+  .card .v { font-size: 22px; margin-top: 4px; font-variant-numeric: tabular-nums; }
+  .chart-wrap { position: relative; height: 400px; margin-top: 16px; }
+  .error-banner { background: #fff0f0; border: 1px solid #f5c6cb; border-radius: 6px; padding: 16px; color: #b00020; margin-top: 24px; }
+  select { font-size: 14px; padding: 6px 10px; border-radius: 4px; border: 1px solid #ccc; margin-bottom: 12px; }
+  code { background: #f3f3f3; padding: 2px 6px; border-radius: 4px; }
+</style>
+</head>
+<body>
+  <h1>PDM Prediction API</h1>
+
+{% if error %}
+  <div class="sub">Model Evaluation — FD001 Test Set</div>
+  <div class="error-banner">
+    Model not available: {{ error }}. The evaluation page requires a loaded champion model.
+  </div>
+{% else %}
+  <div class="sub">Model Evaluation — FD001 Test Set &nbsp;|&nbsp; model <code>{{ model_name }}</code> v<code>{{ model_version }}</code> &nbsp;|&nbsp; {{ n_engines }} engines</div>
+
+  <h2>Test-set metrics (last-cycle predictions)</h2>
+  <div class="grid">
+    <div class="card"><div class="k">RMSE (cycles)</div><div class="v">{{ rmse }}</div></div>
+    <div class="card"><div class="k">MAE (cycles)</div><div class="v">{{ mae }}</div></div>
+    <div class="card"><div class="k">C-MAPSS Score</div><div class="v">{{ cmapss_score }}</div></div>
+    <div class="card"><div class="k">Test engines</div><div class="v">{{ n_engines }}</div></div>
+  </div>
+
+  <h2>Predicted vs Actual RUL ({{ n_engines }} test engines)</h2>
+  <p style="font-size:13px;color:#555;">Each point is one engine — its predicted RUL at the last observed cycle vs the true RUL. Points on the dashed line are perfect predictions.</p>
+  <div class="chart-wrap">
+    <canvas id="scatterChart"></canvas>
+  </div>
+
+  <h2>Engine Degradation Curve</h2>
+  <p style="font-size:13px;color:#555;">Predicted RUL vs true RUL across all cycles for a single engine. Select an engine to inspect.</p>
+  <select id="engineSelect">
+    {% for eid in engine_ids %}
+    <option value="{{ eid }}">Engine {{ eid }}</option>
+    {% endfor %}
+  </select>
+  <div class="chart-wrap">
+    <canvas id="degradationChart"></canvas>
+  </div>
+
+  <script>
+    const SCATTER_DATA = {{ scatter_json }};
+    const DEGRADATION_DATA = {{ degradation_json }};
+
+    // --- Scatter chart ---
+    const maxRul = Math.max(...SCATTER_DATA.map(d => Math.max(d.actual, d.predicted)));
+    const scatterCtx = document.getElementById('scatterChart').getContext('2d');
+    new Chart(scatterCtx, {
+      type: 'scatter',
+      data: {
+        datasets: [
+          {
+            label: 'Engine predictions',
+            data: SCATTER_DATA.map(d => ({ x: d.actual, y: d.predicted })),
+            backgroundColor: 'rgba(52, 120, 246, 0.55)',
+            pointRadius: 5,
+          },
+          {
+            label: 'Perfect prediction',
+            data: [{ x: 0, y: 0 }, { x: maxRul, y: maxRul }],
+            type: 'line',
+            borderColor: '#e55',
+            borderDash: [6, 4],
+            borderWidth: 1.5,
+            pointRadius: 0,
+            fill: false,
+          }
+        ]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: { legend: { position: 'top' } },
+        scales: {
+          x: { title: { display: true, text: 'Actual RUL (cycles)' } },
+          y: { title: { display: true, text: 'Predicted RUL (cycles)' } },
+        }
+      }
+    });
+
+    // --- Degradation chart ---
+    const degCtx = document.getElementById('degradationChart').getContext('2d');
+    const degChart = new Chart(degCtx, {
+      type: 'line',
+      data: { labels: [], datasets: [
+        {
+          label: 'Actual RUL',
+          data: [],
+          borderColor: 'rgba(52, 120, 246, 1)',
+          backgroundColor: 'transparent',
+          borderWidth: 2,
+          pointRadius: 0,
+        },
+        {
+          label: 'Predicted RUL',
+          data: [],
+          borderColor: 'rgba(255, 140, 0, 1)',
+          backgroundColor: 'transparent',
+          borderDash: [5, 3],
+          borderWidth: 2,
+          pointRadius: 0,
+        }
+      ]},
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: { legend: { position: 'top' } },
+        scales: {
+          x: { title: { display: true, text: 'Cycle' } },
+          y: { title: { display: true, text: 'Remaining Useful Life (cycles)' } },
+        }
+      }
+    });
+
+    function renderDegradation(engineId) {
+      const points = DEGRADATION_DATA[String(engineId)] || [];
+      degChart.data.labels = points.map(p => p.cycle);
+      degChart.data.datasets[0].data = points.map(p => p.actual_rul);
+      degChart.data.datasets[1].data = points.map(p => p.predicted_rul);
+      degChart.update();
+    }
+
+    const select = document.getElementById('engineSelect');
+    select.addEventListener('change', () => renderDegradation(select.value));
+    // Render first engine on load
+    if (select.options.length > 0) renderDegradation(select.options[0].value);
+  </script>
+{% endif %}
+
+  <h2>Other endpoints</h2>
+  <ul>
+    <li><a href="/docs">/docs</a> — interactive API docs (Swagger UI)</li>
+    <li><a href="/health">/health</a> — JSON liveness + dependency status</li>
+    <li><a href="/metrics">/metrics</a> — live prediction volume, latency, and drift</li>
+  </ul>
+</body>
+</html>
