@@ -32,7 +32,10 @@ dependencies = [
 
   # ML
   "xgboost>=2.1,<3",
-  "scikit-learn>=1.5,<2",
+  # sklearn 1.8 removed `_estimator_type` from RegressorMixin; xgboost 2.x's
+  # save_model() still relies on it and crashes with `_estimator_type undefined`.
+  # Cap to <1.8 until we move to xgboost 3.x.
+  "scikit-learn>=1.5,<1.8",
   "pandas>=2.2,<3",
   "numpy>=1.26,<3",
 
