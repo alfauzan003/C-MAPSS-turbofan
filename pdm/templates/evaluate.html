@@ -56,8 +56,8 @@
   </div>
 
   <script>
-    const SCATTER_DATA = {{ scatter_json }};
-    const DEGRADATION_DATA = {{ degradation_json }};
+    const SCATTER_DATA = {{ scatter_json | safe }};
+    const DEGRADATION_DATA = {{ degradation_json | safe }};
 
     // --- Scatter chart ---
     const maxRul = Math.max(...SCATTER_DATA.map(d => Math.max(d.actual, d.predicted)));
