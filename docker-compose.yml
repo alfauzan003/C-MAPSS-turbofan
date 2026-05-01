@@ -130,8 +130,16 @@ services:
       - server
       - --host=0.0.0.0
       - --port=5000
-      - --backend-store-uri=postgresql+psycopg://${POSTGRES_USER:-pdm}:${POSTGRES_PASSWORD:-pdm}@postgres:5432/mlflow
+      # MLflow's queries against integer columns (e.g. model_versions.version) are
+      # cast to ::VARCHAR by SQLAlchemy's psycopg3 dialect when the Python value is
+      # a str. Postgres rejects integer = varchar without an implicit cast. psycopg2
+      # emits the bind without the cast and lets Postgres coerce, so we use it here.
+      - --backend-store-uri=postgresql+psycopg2://${POSTGRES_USER:-pdm}:${POSTGRES_PASSWORD:-pdm}@postgres:5432/mlflow
       - --default-artifact-root=s3://${MINIO_BUCKET_ARTIFACTS:-mlflow-artifacts}/
+      # MLflow 3.x rejects requests where the Host header isn't in its allowlist
+      # ("DNS rebinding attack detected"). MLflow matches the full `host:port` string,
+      # so the bare `mlflow` entry does NOT match `mlflow:5000` — the port must be included.
+      - --allowed-hosts=mlflow:5000,mlflow,localhost:5000,localhost,127.0.0.1:5000,127.0.0.1
     environment:
       MLFLOW_S3_ENDPOINT_URL: http://minio:9000
       AWS_ACCESS_KEY_ID: ${MINIO_ACCESS_KEY:-minioadmin}
@@ -225,6 +233,8 @@ services:
       AWS_ACCESS_KEY_ID: ${MINIO_ACCESS_KEY:-minioadmin}
       AWS_SECRET_ACCESS_KEY: ${MINIO_SECRET_KEY:-minioadmin}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      - ./data:/app/data:ro
     depends_on:
       postgres:
         condition: service_healthy
