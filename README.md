@@ -1,222 +1,148 @@
 # Predictive Maintenance ML Pipeline
 
-An end-to-end MLOps system for predicting the **Remaining Useful Life (RUL)** of jet engines using the [NASA C-MAPSS turbofan dataset](https://www.nasa.gov/content/prognostics-center-of-excellence-data-set-repository). A sensor stream flows through ingestion, feature engineering, model training, RUL prediction, drift monitoring, and live dashboards — all running in Docker.
+![Python](https://img.shields.io/badge/Python-3.12-blue?logo=python)
+![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688?logo=fastapi)
+![XGBoost](https://img.shields.io/badge/XGBoost-2.x-orange)
+![MLflow](https://img.shields.io/badge/MLflow-3.x-0194E2?logo=mlflow)
+![Prefect](https://img.shields.io/badge/Prefect-3.x-7C3AED?logo=prefect)
+![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-336791?logo=postgresql)
+![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker)
 
-## Table of contents
+End-to-end **MLOps pipeline** that predicts the Remaining Useful Life (RUL) of jet engines from raw sensor telemetry. Built on the [NASA C-MAPSS turbofan dataset](https://www.nasa.gov/content/prognostics-center-of-excellence-data-set-repository).
 
-- [What it does](#what-it-does)
-- [Stack](#stack)
-- [Architecture](#architecture)
-- [Getting started](#getting-started)
-- [Services & ports](#services--ports)
-- [API reference](#api-reference)
-- [Dashboards](#dashboards)
-- [ML model](#ml-model)
-- [Automated workflows](#automated-workflows)
-- [Drift monitoring](#drift-monitoring)
-- [Database schema](#database-schema)
-- [Configuration](#configuration)
-- [Running tests](#running-tests)
-- [Useful commands](#useful-commands)
-- [Project structure](#project-structure)
+> **What makes this a full MLOps project:** sensor ingestion → feature engineering → model training with experiment tracking → automated promotion → real-time serving → drift monitoring → live dashboards. Every layer is containerised and wired together with production patterns (health checks, structured logging, schema migrations, model registry aliases, PSI-based alerting).
 
 ---
 
-## What it does
+## Pipeline overview
 
-1. **Ingest** — A simulator continuously posts turbofan sensor readings to a FastAPI endpoint, storing them in PostgreSQL.
-2. **Train** — A Prefect flow (every 6 h) engineers 169+ rolling and lag features from the raw readings, trains an XGBoost regressor, and auto-promotes the model if RMSE improves by ≥ 2%.
-3. **Serve** — A prediction API loads the current champion model from MLflow and returns RUL predictions for incoming engine windows. Every prediction is logged to the database for monitoring.
-4. **Monitor** — A second Prefect flow (every 24 h) computes Population Stability Index (PSI) comparing recent serving inputs to the training baseline, and raises an alert if any feature shifts beyond the threshold.
-5. **Observe** — Two browser dashboards: a live `/metrics` page (prediction volume, latency, drift status) and an `/evaluate` page (scatter plot + degradation curves on the FD001 test set).
+```
+Simulator (C-MAPSS FD001, every 5 s)
+    │  POST /sensor-readings
+    ▼
+Ingestion API ──────────────► PostgreSQL (raw_sensor.readings)
+                                    │
+                    Prefect training flow (every 6 h)
+                                    │  feature engineering (190 features)
+                                    │  XGBoost train + MLflow log
+                                    │  auto-promote if RMSE improves ≥ 2%
+                                    ▼
+                           MLflow Model Registry
+                           (champion alias) ◄─── POST /reload-model
+                                    │
+Client ──► POST /predict ──► Prediction API ──► PostgreSQL (predictions.served)
+                                    │
+                    Prefect monitoring flow (every 24 h)
+                                    │  PSI drift vs training baseline
+                                    ▼
+                           PostgreSQL (drift_reports)
+                                    │
+                            GET /metrics  ◄── live dashboard
+```
 
 ---
 
-## Stack
+## Features at a glance
+
+| Capability | Details |
+|---|---|
+| **Sensor ingestion** | FastAPI endpoint, idempotent (409 on duplicate), structured JSON logging |
+| **Feature engineering** | 190 features: rolling mean/std (windows 5/10/20) + lags (1/2/5) per sensor, grouped by engine to prevent leakage |
+| **Model training** | XGBoost regressor, engine-level GroupShuffleSplit (80/20), logged to MLflow (params, metrics, feature importance) |
+| **Auto-promotion** | New model promoted to `champion` alias only if RMSE improves ≥ 2% over current champion |
+| **RUL serving** | FastAPI prediction API, hot-reload without restart, every call logged with latency + input fingerprint |
+| **Drift monitoring** | Per-feature PSI (Population Stability Index) vs training baseline; alert when `max_psi > 0.25` |
+| **Dashboards** | `/metrics` (volume, latency, drift) and `/evaluate` (scatter plot + degradation curves, Chart.js) |
+| **Orchestration** | Two Prefect deployments (training every 6 h, monitoring every 24 h), single worker process |
+| **Observability** | Structured JSON logs (structlog), health endpoints on every API, p50/p95 latency tracking |
+| **Testing** | 56 unit tests (no Docker) + integration tests covering both APIs and both flows |
+
+---
+
+## Tech stack
 
 | Layer | Technology |
 |---|---|
 | Language | Python 3.12 |
-| API | FastAPI + Uvicorn |
-| Database | PostgreSQL 16 |
-| ORM / migrations | SQLAlchemy 2 + Alembic |
-| Object storage | MinIO (S3-compatible) |
-| ML | XGBoost 2 + scikit-learn + pandas |
-| Experiment tracking | MLflow 3 |
+| APIs | FastAPI + Uvicorn |
+| Database | PostgreSQL 16, SQLAlchemy 2, Alembic migrations |
+| Object storage | MinIO (S3-compatible), parquet via PyArrow |
+| ML | XGBoost 2, scikit-learn, pandas |
+| Experiment tracking | MLflow 3 (tracking + model registry) |
 | Orchestration | Prefect 3 |
 | Logging | structlog (JSON) |
-| Packaging | Docker + docker-compose v2 |
+| Infra | Docker + docker-compose v2 |
 
 ---
 
-## Architecture
+## Quick start
 
-```
-simulator (C-MAPSS FD001, every 5 s)
-  └─ POST /sensor-readings
-       └─ ingestion-api
-            └─ raw_sensor.readings  (PostgreSQL)
-
-prefect-worker — training_flow (every 6 h)
-  raw_sensor.readings
-    └─ feature engineering (169 features: rolling means/stds + lags)
-         └─ parquet snapshot  →  MinIO  (raw-data bucket)
-              └─ XGBoost train  →  MLflow  (pdm-rul model + run metrics)
-                   └─ auto-promote to "champion" alias if RMSE improves ≥ 2%
-                        └─ POST /reload-model  →  prediction-api
-
-client
-  └─ POST /predict
-       └─ prediction-api (loads champion model from MLflow)
-            └─ predictions.served  (PostgreSQL)
-
-prefect-worker — monitoring_flow (every 24 h)
-  predictions.served + raw_sensor.readings
-    └─ PSI vs training baseline parquet  (MinIO)
-         └─ predictions.drift_reports  (PostgreSQL)
-              └─ GET /metrics  →  live dashboard
-```
-
----
-
-## Getting started
-
-### Prerequisites
-
-- **Docker Desktop** running (Docker Engine 24+)
-- **Python 3.12+** — only if you want to run tests locally
-- Git
-
-### 1. Clone
+**Prerequisites:** Docker Desktop, Git. Python 3.12+ only needed to run tests locally.
 
 ```bash
-git clone <repo-url>
-cd Project2
-```
+# 1. Clone
+git clone https://github.com/alfauzan003/C-MAPSS-turbofan.git
+cd C-MAPSS-turbofan
 
-### 2. Configure environment
-
-```bash
+# 2. Configure (defaults work out of the box)
 cp .env.example .env
-```
 
-The defaults work out of the box. Only notable gotcha:
-
-> **Windows:** Postgres maps to host port **5433** (not 5432) to avoid conflicts with native Windows postgres. The `.env.example` default already uses 5433 — no change needed.
-
-### 3. Start the full stack
-
-```bash
+# 3. Start everything
 docker compose up -d --build
 ```
 
-This builds the app image, runs Alembic migrations, creates MinIO buckets, and starts all services. First build takes 2–3 minutes. Wait ~30 s for health checks to pass.
+> **Windows note:** Postgres is mapped to host port **5433** (not 5432) to avoid conflicts with native installations. The `.env.example` default already reflects this.
 
-### 4. Trigger the first training run
+Once containers are healthy (~30 s), **trigger the first training run** before making predictions:
 
-The prediction API cannot serve until a champion model exists. Trigger training immediately:
+1. Open **http://localhost:4200** (Prefect UI)
+2. Deployments → `pdm-training/training-default` → **Quick run**
+3. After ~1 min the champion model is promoted and the prediction API is ready
 
-1. Open http://localhost:4200 (Prefect UI)
-2. Go to **Deployments** → `pdm-training/training-default` → **Quick run**
+---
 
-After the flow completes (~1 min), the champion model is promoted and the prediction API is ready.
+## Services
 
-### 5. Verify everything is working
+| Service | URL | Purpose |
+|---|---|---|
+| Ingestion API | http://localhost:8000/docs | Accept sensor readings (Swagger UI) |
+| Prediction API | http://localhost:8001/docs | Serve RUL predictions (Swagger UI) |
+| `/metrics` dashboard | http://localhost:8001/metrics | Volume, latency, drift status |
+| `/evaluate` dashboard | http://localhost:8001/evaluate | Test-set scatter + degradation curves |
+| MLflow UI | http://localhost:5000 | Experiment runs, model registry |
+| Prefect UI | http://localhost:4200 | Flow runs, deployments |
+| MinIO console | http://localhost:9001 | Object storage (`minioadmin` / `minioadmin`) |
+| Postgres | `localhost:5433` | `psql postgres://pdm:pdm@localhost:5433/pdm` |
+
+---
+
+## API
+
+### `POST /sensor-readings` — Ingestion API (port 8000)
+
+Accepts one sensor reading per call. Body: `engine_id`, `cycle`, `op_setting_1/2/3`, `sensor_1`–`sensor_21`, optional `ts`. Returns `201` on success, `409` on duplicate `(engine_id, cycle)`.
+
+### `POST /predict` — Prediction API (port 8001)
+
+Send a window of 1–500 readings for a single engine (ascending cycle order). Returns the predicted RUL for the last cycle, model name/version, and latency.
 
 ```bash
-# Check all services are healthy
-docker compose ps
-
-# Stream ingestion logs
-docker compose logs -f ingestion-api simulator
-
-# Count rows accumulating
-docker compose exec postgres psql -U pdm -c "SELECT count(*) FROM raw_sensor.readings;"
-
-# Make a test prediction
 curl -s -X POST http://localhost:8001/predict \
   -H 'Content-Type: application/json' \
-  -d '{"readings": [{"engine_id": 1, "cycle": 50, "op_setting_1": 0.0, "op_setting_2": 0.0, "op_setting_3": 100.0, "sensor_1": 518.67, "sensor_2": 641.82, "sensor_3": 1589.7, "sensor_4": 1400.6, "sensor_5": 14.62, "sensor_6": 21.61, "sensor_7": 554.36, "sensor_8": 2388.02, "sensor_9": 9046.19, "sensor_10": 1.3, "sensor_11": 47.47, "sensor_12": 521.66, "sensor_13": 2388.02, "sensor_14": 8138.62, "sensor_15": 8.4195, "sensor_16": 0.03, "sensor_17": 392, "sensor_18": 2388, "sensor_19": 100.0, "sensor_20": 38.86, "sensor_21": 23.3619}]}'
+  -d '{
+    "readings": [{
+      "engine_id": 1, "cycle": 50,
+      "op_setting_1": 0.0, "op_setting_2": 0.0, "op_setting_3": 100.0,
+      "sensor_1": 518.67, "sensor_2": 641.82, "sensor_3": 1589.7,
+      "sensor_4": 1400.6, "sensor_5": 14.62, "sensor_6": 21.61,
+      "sensor_7": 554.36, "sensor_8": 2388.02, "sensor_9": 9046.19,
+      "sensor_10": 1.3, "sensor_11": 47.47, "sensor_12": 521.66,
+      "sensor_13": 2388.02, "sensor_14": 8138.62, "sensor_15": 8.4195,
+      "sensor_16": 0.03, "sensor_17": 392, "sensor_18": 2388,
+      "sensor_19": 100.0, "sensor_20": 38.86, "sensor_21": 23.3619
+    }]
+  }'
 ```
-
----
-
-## Services & ports
-
-| Service | Host port | URL | Notes |
-|---|---|---|---|
-| ingestion-api | 8000 | http://localhost:8000/docs | Swagger UI |
-| prediction-api | 8001 | http://localhost:8001/docs | Swagger UI |
-| MLflow UI | 5000 | http://localhost:5000 | Experiment runs + model registry |
-| Prefect UI | 4200 | http://localhost:4200 | Flow runs + deployments |
-| MinIO console | 9001 | http://localhost:9001 | Object storage (user: `minioadmin` / `minioadmin`) |
-| MinIO S3 API | 9000 | — | Internal S3 endpoint |
-| Postgres | 5433 | `psql postgres://pdm:pdm@localhost:5433/pdm` | Direct access |
-
----
-
-## API reference
-
-### Ingestion API — port 8000
-
-#### `POST /sensor-readings`
-
-Accepts a single sensor reading from an engine.
-
-**Request body**
-
-| Field | Type | Constraints |
-|---|---|---|
-| `engine_id` | int | > 0 |
-| `cycle` | int | > 0 |
-| `op_setting_1` | float | — |
-| `op_setting_2` | float | — |
-| `op_setting_3` | float | — |
-| `sensor_1` … `sensor_21` | float (×21) | — |
-| `ts` | datetime (ISO 8601) | optional; defaults to `NOW()` |
-
-**Responses**
-
-| Code | Meaning |
-|---|---|
-| 201 | Reading stored; returns `{id, engine_id, cycle}` |
-| 409 | Duplicate — `(engine_id, cycle)` already exists |
-| 422 | Validation error |
-
-#### `GET /health`
-
-Returns `{status: "ok" | "degraded", detail: string | null}`. Checks DB connectivity.
-
----
-
-### Prediction API — port 8001
-
-#### `POST /predict`
-
-Predicts RUL for a single engine using its recent sensor window.
-
-**Request body**
-
-```json
-{
-  "readings": [
-    {
-      "engine_id": 1,
-      "cycle": 50,
-      "op_setting_1": 0.0,
-      "op_setting_2": 0.0,
-      "op_setting_3": 100.0,
-      "sensor_1": 518.67,
-      "... sensor_2 through sensor_21 ...": "..."
-    }
-  ]
-}
-```
-
-- `readings`: 1–500 rows; all must share the same `engine_id`
-- Order matters — rows should be in ascending cycle order for correct lag/rolling features
-
-**Response**
 
 ```json
 {
@@ -229,91 +155,14 @@ Predicts RUL for a single engine using its recent sensor window.
 }
 ```
 
-- Returns the prediction for the **last (most recent) cycle** in the window
-- Every call is logged to `predictions.served` for drift monitoring
-- If fewer than 6 rows are passed, lag-5 features will be NaN (zero-filled with a warning)
+### Other endpoints
 
-**Responses**
-
-| Code | Meaning |
-|---|---|
-| 200 | Prediction returned |
-| 422 | Validation error or mixed engine IDs |
-| 503 | Model not loaded (no champion in MLflow yet) |
-
-#### `POST /reload-model`
-
-Hot-reloads the current `champion` alias from MLflow without restarting the container. Returns `{loaded: "<version>"}`. Called automatically after auto-promotion; safe to call manually at any time.
-
-#### `GET /health`
-
-Returns `{status: "ok" | "degraded", detail: string | null}`. Checks both DB connectivity and model loaded state.
-
-#### `GET /metrics`
-
-HTML dashboard — see [Dashboards](#dashboards).
-
-#### `GET /evaluate`
-
-HTML evaluation page — see [Dashboards](#dashboards).
-
----
-
-## Dashboards
-
-### `/metrics` — Live prediction dashboard
-
-http://localhost:8001/metrics
-
-Server-rendered page (refresh to update). Shows:
-
-**Prediction volume (last 24 h)**
-- Total predictions served
-- Distinct engines seen
-- p50 latency (ms)
-- p95 latency (ms)
-
-**Latest drift report**
-- Report timestamp (UTC)
-- Comparison window duration (hours)
-- Maximum PSI across all features
-- Alert status: YES (red) / no (green)
-
-**Feature PSI table** (sorted by PSI descending)
-
-| PSI range | Status label | Colour |
+| Endpoint | Method | Description |
 |---|---|---|
-| > 0.25 | significant | red |
-| 0.10 – 0.25 | moderate | — |
-| < 0.10 | stable | green |
-
-> The drift report section only appears after the monitoring flow has run at least once.
-
----
-
-### `/evaluate` — Model evaluation on FD001 test set
-
-http://localhost:8001/evaluate
-
-Runs inference on `data/cmapss/test_FD001.txt` at request time using the live champion model. Shows:
-
-**Test-set metrics** (last-cycle prediction per engine vs ground-truth RUL labels)
-- RMSE (cycles)
-- MAE (cycles)
-- C-MAPSS Score (asymmetric penalty — see [Evaluation metrics](#evaluation-metrics))
-- Number of test engines (100 for FD001)
-
-**Scatter plot** — Predicted RUL vs Actual RUL
-- One point per test engine at its last observed cycle
-- Dashed diagonal = perfect prediction line
-- Useful for spotting systematic over/under-prediction
-
-**Degradation curves** (interactive dropdown per engine)
-- X-axis: cycle number
-- Y-axis: RUL (cycles remaining)
-- Blue solid line: actual RUL
-- Orange dashed line: model's prediction at each cycle
-- Shows how well the model tracks degradation over an engine's full life
+| `/reload-model` | POST | Hot-reload champion from MLflow (no restart needed) |
+| `/health` | GET | Both APIs — DB + model state check |
+| `/metrics` | GET | Live HTML dashboard (prediction API) |
+| `/evaluate` | GET | Test-set evaluation with interactive charts (prediction API) |
 
 ---
 
@@ -321,308 +170,135 @@ Runs inference on `data/cmapss/test_FD001.txt` at request time using the live ch
 
 ### Dataset
 
-[NASA C-MAPSS FD001](https://www.nasa.gov/content/prognostics-center-of-excellence-data-set-repository) — 100 training engines, 100 test engines, single operating condition, single fault mode. Each engine runs from new until failure; 21 sensor channels recorded per cycle.
+NASA C-MAPSS **FD001** — 100 training engines, 100 test engines, single operating condition. 21 sensor channels per cycle, recorded until engine failure.
 
-### Feature engineering
+### Features (190 total)
 
-For each of the 21 sensors, the following features are computed **per engine** (grouped so features don't leak across engines):
+For each of 21 sensors, computed **per engine** (no cross-engine leakage):
 
-| Feature type | Windows / lags | Count per sensor |
-|---|---|---|
-| Rolling mean | 5, 10, 20 cycles | 3 |
-| Rolling std | 5, 10, 20 cycles | 3 |
-| Lag values | 1, 2, 5 cycles back | 3 |
+- Rolling mean + std at windows **5, 10, 20** cycles → 6 features/sensor
+- Lag values at **1, 2, 5** cycles back → 3 features/sensor
+- `time_since_start` (global) → 1 feature
 
-Plus one global feature: `time_since_start` = current cycle − min cycle for that engine.
+### Target
 
-**Total features: 21 × 9 + 1 = 190** (rows with NaN from early cycles are dropped before training).
+`RUL = max_cycle(engine) − current_cycle`, **capped at 125** (standard C-MAPSS practice).
 
-### Target variable
+### XGBoost hyperparameters
 
-`RUL = max_cycle(engine) − current_cycle`, capped at **125 cycles** (standard C-MAPSS practice to suppress the long flat region early in engine life).
+`n_estimators=400, max_depth=6, learning_rate=0.05, subsample=0.8, colsample_bytree=0.8, tree_method=hist`
 
-### Model
-
-XGBoost Regressor with the following hyperparameters:
-
-| Parameter | Value |
-|---|---|
-| `objective` | `reg:squarederror` |
-| `n_estimators` | 400 |
-| `max_depth` | 6 |
-| `learning_rate` | 0.05 |
-| `subsample` | 0.8 |
-| `colsample_bytree` | 0.8 |
-| `tree_method` | `hist` |
-
-**Train/val split**: GroupShuffleSplit at engine level (80/20), seed=42. Engines do not leak between splits.
+Train/val split: **GroupShuffleSplit 80/20** at engine level, seed=42.
 
 ### Evaluation metrics
 
-| Metric | Formula | Notes |
-|---|---|---|
-| RMSE | `√mean((ŷ − y)²)` | Standard regression error in cycles |
-| MAE | `mean(\|ŷ − y\|)` | Mean absolute error in cycles |
-| C-MAPSS Score | `Σ (exp(−d/13)−1)` if `d<0`, else `Σ (exp(d/10)−1)` where `d = ŷ − y` | Asymmetric; **late predictions (positive d) are penalised ~10× harder than early ones** |
-
-### Model registry
-
-Models are registered in MLflow as `pdm-rul`. The current best model holds the **`champion` alias**. The prediction API always loads the champion at startup and on `/reload-model`.
+| Metric | Notes |
+|---|---|
+| RMSE | Standard regression error (cycles) |
+| MAE | Mean absolute error (cycles) |
+| C-MAPSS Score | Asymmetric penalty: late predictions (`d > 0`) penalised ~10× harder than early ones via `exp(d/10) − 1` |
 
 ---
 
 ## Automated workflows
 
-Both workflows are served as Prefect deployments by `prefect-worker` and run on schedule. Trigger manually via the Prefect UI or CLI.
+### Training flow — every 6 hours
 
-### Training flow (`pdm-training/training-default`)
+`fetch readings (24 h) → build 190 features → snapshot to MinIO (parquet) → XGBoost train → log to MLflow → auto-promote if RMSE improves ≥ 2% → reload prediction API`
 
-**Schedule**: every 6 hours (configurable via `TRAINING_INTERVAL_SECONDS`)
+### Monitoring flow — every 24 hours
 
-| Step | Task | What happens |
-|---|---|---|
-| 1 | Fetch readings | Load last 24 h of raw sensor rows from `raw_sensor.readings` |
-| 2 | Build features | Compute rolling/lag features, add RUL target (cap 125), drop NaN rows |
-| 3 | Snapshot to MinIO | Write feature DataFrame to parquet at `raw-data/training-snapshots/<run_id>.parquet` |
-| 4 | Train model | XGBoost with GroupShuffleSplit; log params, RMSE/MAE/score, feature importance to MLflow |
-| 5 | Auto-promote | If new RMSE improves on champion by ≥ `PROMOTE_RMSE_IMPROVEMENT_PCT` (default 2%), set `champion` alias and call `/reload-model` |
+`load champion parquet from MinIO → fetch recent serving inputs → compute PSI per sensor (10 quantile bins) → write drift report → alert if max PSI > 0.25`
 
-### Monitoring flow (`pdm-monitoring/monitoring-default`)
+Trigger either flow immediately from the **Prefect UI** or:
 
-**Schedule**: every 24 hours (configurable via `MONITORING_INTERVAL_SECONDS`)
-
-| Step | Task | What happens |
-|---|---|---|
-| 1 | Get champion info | Look up current champion version + training parquet URI from MLflow |
-| 2 | Fetch recent inputs | Get raw sensor rows for engines that received predictions in the last 24 h |
-| 3 | Compute PSI | Per-sensor PSI between training baseline (parquet) and recent serving data (10 quantile bins) |
-| 4 | Write drift report | Save results to `predictions.drift_reports`; set `alert=true` if `max_psi > 0.25` |
-
-Flow returns `{status: "skipped_no_inputs"}` if no predictions were served in the window.
+```bash
+docker compose exec prefect-worker prefect deployment run pdm-training/training-default
+```
 
 ---
 
 ## Drift monitoring
 
-Drift is measured using **Population Stability Index (PSI)** per sensor feature:
+**Population Stability Index (PSI)** measures distribution shift per sensor between the training baseline and recent serving data:
 
 ```
-PSI = Σ (p_compare − p_baseline) × ln(p_compare / p_baseline)
+PSI = Σ (p_current − p_baseline) × ln(p_current / p_baseline)
 ```
 
-- **Baseline**: training set (loaded from MinIO parquet linked to the champion model)
-- **Compare**: raw sensor readings for engines served in the last 24 h
-- **Bins**: 10 quantile-based histogram bins derived from the baseline
-- **Alert threshold**: `max_psi > 0.25`
-
-| PSI | Interpretation |
+| PSI | Status |
 |---|---|
-| < 0.10 | No significant change |
-| 0.10 – 0.25 | Moderate shift — monitor |
-| > 0.25 | Significant shift — **alert triggered** |
+| < 0.10 | Stable |
+| 0.10 – 0.25 | Moderate shift |
+| > 0.25 | **Alert** |
 
-Drift reports are stored in `predictions.drift_reports` and visible on the `/metrics` dashboard.
+Results are persisted to `predictions.drift_reports` and surfaced on the `/metrics` dashboard with per-feature colour coding.
 
 ---
 
-## Database schema
+## Testing
 
-Four schemas in PostgreSQL:
+```bash
+# Unit tests — no Docker needed (56 tests)
+pip install -e ".[dev]"
+python -m pytest tests/unit/ -v
 
-### `raw_sensor.readings`
+# Full suite — requires Docker stack
+python -m pytest tests/ -v
+```
 
-Raw sensor readings from the ingestion API.
-
-| Column | Type | Notes |
-|---|---|---|
-| `id` | bigint PK | Auto-increment |
-| `engine_id` | int | Indexed |
-| `cycle` | int | — |
-| `op_setting_1/2/3` | float | Operational parameters |
-| `sensor_1` … `sensor_21` | float ×21 | Sensor channels |
-| `ts` | timestamptz | Client-supplied; defaults to `NOW()` |
-| `ingested_at` | timestamptz | Server write time; defaults to `NOW()` |
-
-Unique constraint on `(engine_id, cycle)`.
-
-### `features.engine_window`
-
-Metadata index for training feature snapshots.
-
-| Column | Type | Notes |
-|---|---|---|
-| `id` | bigint PK | — |
-| `training_run_id` | varchar(64) | Indexed |
-| `engine_id` | int | — |
-| `cycle` | int | — |
-| `rul` | int | Target value for this row |
-| `parquet_uri` | varchar(512) | MinIO path to full feature parquet |
-| `created_at` | timestamptz | — |
-
-### `predictions.served`
-
-Log of every prediction request.
-
-| Column | Type | Notes |
-|---|---|---|
-| `id` | bigint PK | — |
-| `engine_id` | int | Indexed |
-| `predicted_rul` | float | — |
-| `model_name` | varchar(64) | e.g. `pdm-rul` |
-| `model_version` | varchar(32) | Indexed |
-| `input_fingerprint` | varchar(64) | SHA-256 of input rows |
-| `n_input_rows` | int | — |
-| `latency_ms` | float | — |
-| `served_at` | timestamptz | Indexed; defaults to `NOW()` |
-
-### `predictions.drift_reports`
-
-One row per monitoring flow run.
-
-| Column | Type | Notes |
-|---|---|---|
-| `id` | bigint PK | — |
-| `model_name` | varchar(64) | — |
-| `model_version` | varchar(32) | Indexed |
-| `window_start` | timestamptz | Start of comparison window |
-| `window_end` | timestamptz | End of comparison window |
-| `n_baseline_rows` | int | Training set size |
-| `n_compare_rows` | int | Recent serving data size |
-| `psi_per_feature` | JSON | `{"sensor_3": 0.12, "sensor_7": 0.31, ...}` |
-| `max_psi` | float | Indexed |
-| `alert` | boolean | `true` if `max_psi > 0.25` |
-| `created_at` | timestamptz | Indexed |
+Coverage: ingestion API, prediction API, feature engineering, training flow, monitoring flow, PSI computation.
 
 ---
 
 ## Configuration
 
-All settings are loaded from `.env` (copy from `.env.example`). Sensitive values have safe defaults for local dev.
+Copy `.env.example` → `.env`. All defaults work locally.
 
-| Variable | Default | Description |
+| Variable | Default | Notes |
 |---|---|---|
-| `POSTGRES_HOST` | `postgres` | DB hostname (Docker service name) |
-| `POSTGRES_PORT` | `5432` | DB port inside Docker (host mapped to 5433) |
-| `POSTGRES_USER` | `pdm` | — |
-| `POSTGRES_PASSWORD` | `pdm` | — |
-| `POSTGRES_DB` | `pdm` | — |
-| `MINIO_ENDPOINT_URL` | `http://minio:9000` | S3-compatible endpoint |
-| `MINIO_ACCESS_KEY` | `minioadmin` | — |
-| `MINIO_SECRET_KEY` | `minioadmin` | — |
-| `MINIO_BUCKET_RAW` | `raw-data` | Bucket for training parquet snapshots |
-| `MINIO_BUCKET_ARTIFACTS` | `mlflow-artifacts` | Bucket for MLflow artifacts |
+| `POSTGRES_*` | `pdm/pdm/pdm` | Host/port/user/password/db |
+| `MINIO_*` | `minioadmin` | Endpoint, keys, bucket names |
+| `PROMOTE_RMSE_IMPROVEMENT_PCT` | `2.0` | Auto-promotion threshold (%) |
+| `INGEST_INTERVAL_SEC` | `5` | Simulator posting cadence |
+| `TRAINING_INTERVAL_SECONDS` | `21600` | 6 h; override to retrain faster |
+| `MONITORING_INTERVAL_SECONDS` | `86400` | 24 h |
 | `LOG_LEVEL` | `INFO` | structlog level |
-| `INGEST_INTERVAL_SEC` | `5` | Simulator sleep between posts (seconds) |
-| `PROMOTE_RMSE_IMPROVEMENT_PCT` | `2.0` | Minimum RMSE improvement % to auto-promote |
-| `TRAINING_INTERVAL_SECONDS` | `21600` | Training flow schedule (6 h) |
-| `MONITORING_INTERVAL_SECONDS` | `86400` | Monitoring flow schedule (24 h) |
-| `MLFLOW_TRACKING_URI` | `http://mlflow:5000` | MLflow server |
-| `PREDICTION_API_URL` | `http://prediction-api:8001` | Used by training flow to trigger reload |
-
----
-
-## Running tests
-
-Unit tests have no external dependencies:
-
-```bash
-pip install -e ".[dev]"
-python -m pytest tests/unit/ -v
-```
-
-Integration tests require the Docker stack:
-
-```bash
-docker compose up -d postgres minio mlflow
-python -m pytest tests/ -v
-```
-
-The test suite has 56 unit tests and integration tests covering the ingestion API, prediction API, training flow, and monitoring flow.
-
----
-
-## Useful commands
-
-```bash
-# Rebuild and restart a single service after a code change
-docker compose up -d --build prediction-api
-
-# Stream all logs
-docker compose logs -f
-
-# Stream specific services
-docker compose logs -f ingestion-api simulator prefect-worker
-
-# Open a postgres shell
-docker compose exec postgres psql -U pdm
-
-# Count predictions served
-docker compose exec postgres psql -U pdm -c "SELECT count(*) FROM predictions.served;"
-
-# View latest drift report
-docker compose exec postgres psql -U pdm -c \
-  "SELECT model_version, max_psi, alert, created_at FROM predictions.drift_reports ORDER BY created_at DESC LIMIT 5;"
-
-# Force-promote a specific MLflow model version to champion
-docker compose exec prefect-worker python - <<'PY'
-import os
-from pdm.models.registry import promote_to_production
-promote_to_production(version="1", tracking_uri=os.environ["MLFLOW_TRACKING_URI"])
-PY
-
-# Reload the prediction model after manually promoting a version
-curl -X POST http://localhost:8001/reload-model
-
-# Trigger training flow immediately via CLI
-docker compose exec prefect-worker prefect deployment run pdm-training/training-default
-
-# Stop everything (preserves volumes)
-docker compose down
-
-# Full reset — deletes all data
-docker compose down -v
-```
 
 ---
 
 ## Project structure
 
 ```
-pdm/                       # Main Python package
-  apis/
-    ingestion_api.py       # POST /sensor-readings, GET /health
-    prediction_api.py      # POST /predict, /reload-model, GET /health, /metrics, /evaluate
-  features/
-    rul.py                 # compute_rul() — adds capped RUL target column
-    windows.py             # compute_windows() — rolling means/stds + lags per sensor
-  flows/
-    training_flow.py       # Prefect flow: fetch → features → snapshot → train → promote
-    monitoring_flow.py     # Prefect flow: PSI drift vs training baseline → drift report
-    _serve.py              # Single worker entrypoint: serves both deployments
-  models/
-    train.py               # train_and_log(), compare_and_promote_decision(), promote()
-    evaluate.py            # rmse(), mae(), cmapss_score()
-    registry.py            # load_production(), promote_to_production() — MLflow alias API
-  monitoring/
-    drift.py               # compute_psi(), compute_psi_per_column() — PSI implementation
-  orm/
-    raw_sensor.py          # SensorReading → raw_sensor.readings
-    features.py            # EngineWindow → features.engine_window
-    predictions.py         # ServedPrediction + DriftReport → predictions.*
-  simulator/
-    run.py                 # C-MAPSS CSV loader + HTTP posting loop
-  templates/
-    metrics.html           # Jinja2 — /metrics dashboard
-  config.py                # pydantic-settings; get_settings() with lru_cache
-  db.py                    # Engine + session factory
-  predict.py               # PredictService — loads champion model, runs inference
-  schemas.py               # Pydantic request/response schemas
-migrations/                # Alembic versions (4 migrations: raw_sensor → features → predictions)
-data/cmapss/               # NASA C-MAPSS FD001–FD004 (train/test/RUL files — committed)
-docker/
-  mlflow.Dockerfile        # MLflow server image (pins mlflow>=3,<4)
-scripts/postgres-init/     # DB init: pg_hba trust auth, create mlflow + prefect databases
+pdm/
+├── apis/
+│   ├── ingestion_api.py      # POST /sensor-readings, GET /health
+│   └── prediction_api.py     # POST /predict, /reload-model, /metrics, /evaluate
+├── features/
+│   ├── rul.py                # RUL target computation (capped at 125)
+│   └── windows.py            # Rolling/lag feature engineering
+├── flows/
+│   ├── training_flow.py      # Prefect: fetch → features → train → promote
+│   ├── monitoring_flow.py    # Prefect: PSI drift detection → drift report
+│   └── _serve.py             # Single worker serving both deployments
+├── models/
+│   ├── train.py              # XGBoost training + MLflow logging
+│   ├── evaluate.py           # RMSE, MAE, C-MAPSS score
+│   └── registry.py           # MLflow alias API (champion promotion)
+├── monitoring/
+│   └── drift.py              # PSI computation
+├── orm/                      # SQLAlchemy models (4 tables across 3 schemas)
+├── simulator/
+│   └── run.py                # C-MAPSS CSV loader + HTTP posting loop
+├── templates/
+│   └── metrics.html          # Jinja2 dashboard template
+├── config.py                 # pydantic-settings (.env loader)
+├── db.py                     # Engine + session factory
+├── predict.py                # PredictService (champion model loader)
+└── schemas.py                # Pydantic request/response schemas
+migrations/                   # 4 Alembic versions
+data/cmapss/                  # NASA C-MAPSS FD001–FD004 (committed)
 tests/
-  unit/                    # 56 tests — no Docker required
-  integration/             # Requires full Docker stack
+├── unit/                     # 56 tests, no Docker
+└── integration/              # Full stack tests
 ```
